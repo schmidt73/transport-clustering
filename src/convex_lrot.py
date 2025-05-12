@@ -30,7 +30,7 @@ def solve_euclidean_reg_ot_cvxpy(
     g2: np.ndarray, 
     P_reg: np.ndarray, 
     rho: float = 0.1,
-    solver: str = "MOSEK"
+    solver: str = "GUROBI"
 ):
     m, n = C.shape
     if g1.shape != (m,) or g2.shape != (n,):

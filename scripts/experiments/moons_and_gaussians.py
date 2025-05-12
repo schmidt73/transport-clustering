@@ -105,7 +105,7 @@ if __name__ == "__main__":
                 "algorithm": args.algorithm,
             })
     elif args.algorithm == "frlc":
-        for i in range(args.restart):
+        for i in range(args.restarts):
             P, errs = frlc.FRLC_opt(
                 C, device=device, r=rank, max_iter=20, returnFull=True, gamma=70, max_inneriters_balanced=500, max_inneriters_relaxed=500
             )
@@ -122,5 +122,5 @@ if __name__ == "__main__":
             })
 
     results = pd.DataFrame(results)
-    results.to_csv(f"{args.output}_{args.algorithm}_{args.n}_{args.rank}.csv", index=False)
+    results.to_csv(f"{args.output}", index=False)
             
