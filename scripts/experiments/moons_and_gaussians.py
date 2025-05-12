@@ -87,7 +87,7 @@ if __name__ == "__main__":
     if args.algorithm == "clrot":
         gamma = (1.0 / args.n)
         P, objective_lb = clrot.solve_nuclear_ot(
-            C.cpu().numpy(), g1, g2, k=rank, gamma=gamma, max_iter=50, tolerance=1e-4, verbose=True
+            C.cpu().numpy(), g1, g2, k=rank, gamma=gamma, max_iter=250, tolerance=1e-4, verbose=True
         )
 
         for i in range(args.restarts):
