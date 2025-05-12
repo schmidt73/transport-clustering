@@ -1,5 +1,4 @@
 import torch
-import util
 from sklearn.cluster import KMeans
 import random
 from torch.distributions.multivariate_normal import MultivariateNormal

@@ -22,8 +22,6 @@ def nuclear_projection(A):
     """Projection onto nuclear norm ball."""
     U, s, V = np.linalg.svd(A, full_matrices=False)
     s = simplex_projection(s)
-    print(np.abs(s).sum())
-    print((s[:5]*s[:5]).sum() + (s[5:].sum() * s[5:].sum()))
     return U.dot(np.diag(s).dot(V))
 
 def solve_euclidean_reg_ot_cvxpy(
@@ -91,8 +89,8 @@ def solve_nuclear_ot(
             logger.info(f"Time for Nuclear Projection: {end_time_nuc_proj - start_time_nuc_proj}")
 
         iteration += 1
-        if np.linalg.norm(R, "fro") < tolerance and iteration > 1:
-            break
+        # if np.linalg.norm(R, "fro") < tolerance and iteration > 1:
+        #    break
 
     return P1, np.sum(C * P1)
 
@@ -141,8 +139,8 @@ def sinkhorn_rescaling(L, R, g1, g2, max_iter=1000, tol=1e-12):
             break
     return L, R
 
-def nonnegative_rounding(P, g1, g2, k):
-    model = NMF(n_components=5, init='random', random_state=0)
+def nonnegative_rounding(P, g1, g2, k, seed=0):
+    model = NMF(n_components=k, init='random', random_state=seed, max_iter=1000)
     W = model.fit_transform(P)
     H = model.components_
     L_round, R_round = sinkhorn_rescaling(W, H, g1, g2)
