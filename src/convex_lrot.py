@@ -12,24 +12,6 @@ from ott.problems.linear import linear_problem
 from ott.solvers.linear import sinkhorn
 from loguru import logger
 from sklearn.decomposition import NMF
-from jax.experimental.sparse.linalg import lobpcg_standard as lobpcg
-
-def simplex_projection(s):
-    """Projection onto the unit simplex."""
-    if np.sum(s) <=1 and np.alltrue(s >= 0):
-        return s
-    u = np.sort(s)[::-1]
-    cssv = np.cumsum(u)
-    rho = np.nonzero(u * np.arange(1, len(u)+1) > (cssv - 1))[0][-1]
-    theta = (cssv[rho] - 1) / (rho + 1.0)
-    return np.maximum(s-theta, 0)
-
-def nuclear_projection(A):
-    """Projection onto nuclear norm ball."""
-    U, s, V = np.linalg.svd(A, full_matrices=False)
-    s = simplex_projection(s)
-    print(s)
-    return U.dot(np.diag(s).dot(V))
 
 def solve_linear_ot_cvxpy(
     C: np.ndarray, 
@@ -64,7 +46,6 @@ def solve_euclidean_reg_ot_cvxpy(
     C: np.ndarray, 
     g1: np.ndarray, 
     g2: np.ndarray, 
-    P_reg: np.ndarray, 
     rho: float = 0.1,
     solver: str = "MOSEK"
 ):
@@ -82,7 +63,7 @@ def solve_euclidean_reg_ot_cvxpy(
         P.T @ ones_m == g2
     ]
 
-    objective = cp.Minimize(cp.sum(cp.multiply(C, P)) + rho * cp.norm(P - P_reg, "fro")**2)
+    objective = cp.Minimize(cp.sum(cp.multiply(C, P)) + (rho / 2.0) * cp.norm(P, "fro")**2)
     prob = cp.Problem(objective, constraints)
     prob.solve(solver=solver, verbose=False)
 
@@ -91,27 +72,82 @@ def solve_euclidean_reg_ot_cvxpy(
 
     return P.value, prob.value
 
+def simplex_projection(X: jnp.ndarray, t: jnp.ndarray):
+    """
+    Given a vector (x_1, \\ldots, x_n) and a scalar t, finds \\theta
+    such that \sum_{i=1}^n[x_i - \\theta]_+ = t. 
+    
+    Rather than taking in a single vector, we take in a vector of 
+    vectors X : m-by-n and an n-dimensional vector of scalars t,
+    for which we solve the problem independently for each row of X.
+
+    Based upon the algorithm of Duchi et al. 2008, "Efficient 
+    Projections onto the \\ell_1 Ball for Learning in High 
+    Dimensions".
+    """
+    X = jnp.sort(X, axis=1)[:, ::-1]
+    X_cum = jnp.cumsum(X, axis=1)
+    rhos  = X - (1.0 / jnp.arange(1, X_cum.shape[1] + 1)) * (X_cum.T - t).T 
+    rho   = jnp.argmax((rhos > 0) * jnp.arange(0, X_cum.shape[1]), axis=1)
+    theta = (1.0 / (rho + 1)) * (X_cum[jnp.arange(0, X_cum.shape[0]), rho] - t)
+    return theta
+
+@jax.jit
+def nuclear_projection(A):
+    """Projection onto nuclear norm ball."""
+    U, s, V = jnp.linalg.svd(A, full_matrices=False)
+    theta = simplex_projection(s[None,:], jnp.array([1.0]))[0]
+    s = jnp.maximum(s - theta, 0)
+    return U.dot(jnp.diag(s).dot(V))
+
+@jax.jit
+def solve_euclidean_reg_ot(
+    C: jnp.ndarray, 
+    g1: jnp.ndarray, 
+    g2: jnp.ndarray, 
+    P1_alpha : jnp.ndarray,
+    P2_beta : jnp.ndarray,
+    rho: float = 100,
+    iterations: int = 10
+):
+    alpha = P1_alpha
+    beta  = P2_beta
+
+    def body(_, state):
+        alpha, beta = state
+        alpha = simplex_projection(-(C + beta),  rho * g1)
+        beta  = simplex_projection(-(C.T + alpha), rho * g2)
+        return (alpha, beta)
+
+    alpha, beta = jax.lax.fori_loop(0, iterations, body, (alpha, beta))
+    P = jnp.maximum(-(C + alpha[:, None] + beta[None, :]), 0) / rho
+    return P, alpha, beta
+
 def solve_nuclear_ot(
-    C: np.ndarray, 
-    g1: np.ndarray, 
-    g2: np.ndarray, 
+    C: jnp.ndarray, 
+    g1: jnp.ndarray, 
+    g2: jnp.ndarray, 
     k: int, gamma: float, 
     max_iter: int = 100, 
     tolerance: float = 1e-4, 
     rho: float = 100,
     verbose: bool = False
 ):
-    P2 = np.zeros_like(C)
-    D  = np.zeros_like(C)
+    P1_alpha = jnp.zeros_like(g1)
+    P1_beta  = jnp.zeros_like(g2)
+    P2       = jnp.zeros_like(C)
+    D        = jnp.zeros_like(C)
 
     iteration = 0
     while iteration < max_iter:
         start_time_euc_ot = time.time()
-        P1, objective = solve_euclidean_reg_ot_cvxpy(C, g1, g2, P2 - D, rho=rho) # can replace with Sinkhorn type solver
+        P1, P1_alpha, P1_beta = solve_euclidean_reg_ot(C - rho * (P2 - D), g1, g2, P1_alpha, P1_beta, rho=rho)
+        P1.block_until_ready()
         end_time_euc_ot = time.time()
 
         start_time_nuc_proj = time.time()
         P2 = (gamma * k) * nuclear_projection((P1 + D) / (gamma * k))
+        P2.block_until_ready()
         end_time_nuc_proj = time.time()
 
         R  = P1 - P2
@@ -119,43 +155,14 @@ def solve_nuclear_ot(
 
         if verbose:
             logger.info(f"Iteration {iteration}")
-            logger.info(f"Objective: {np.sum(C * P1)}")
-            logger.info(f"Residual Norm: {np.linalg.norm(R)}")
+            logger.info(f"Objective: {jnp.sum(C * P1)}")
+            logger.info(f"Residual Norm: {jnp.linalg.norm(R)}")
             logger.info(f"Time for Euclidean OT: {end_time_euc_ot - start_time_euc_ot}")
             logger.info(f"Time for Nuclear Projection: {end_time_nuc_proj - start_time_nuc_proj}")
 
         iteration += 1
-        # if np.linalg.norm(R, "fro") < tolerance and iteration > 1:
-        #    break
 
     return P1, np.sum(C * P1)
-
-def entropy_regularized_nuclear_projection(
-    C,
-    P1: jnp.ndarray,
-    P2: jnp.ndarray,
-    D: jnp.ndarray,
-    nuclear_norm_bound : float,
-    iterations: int = 1000,
-):
-    # MAJOR ISSUE: doesn't preserve feasability
-    def loss(P2, P1, D):
-        return jnp.sum(D * P2) + jnp.sum(jax.scipy.special.rel_entr(P1, P2))
-    loss_grad = jax.value_and_grad(loss)
-    # use franke wolfe or nuclear norm ball
-    for i in range(iterations):
-        obj, G = loss_grad(P2, P1, D)
-        step_size = 1e-2
-        #print(P1)
-        print(f"Q-step Objective Cost: {obj}")
-        # G = D - jnp.where(P2 != 0, P1 / P2, 0)  # gradient of the objective with safeguard for division by zero
-        U, S, V = jnp.linalg.svd(G)             # TODO: replace with lobpcg to find only 1 singular vector
-        #print(G)
-        direction = -nuclear_norm_bound * U[:, 0] @ V[0, :]
-        P2 = (1 - step_size) * P2 + step_size * direction
-        print(f"Linear Objective Cost: {(C * P2).sum()}")
-        #1/ 0
-    return P2
 
 #@jax.jit
 def sink_helper(
@@ -165,42 +172,6 @@ def sink_helper(
     prob = linear_problem.LinearProblem(geom, g1, g2)
     solver = sinkhorn.Sinkhorn(min_iterations=min_iterations, max_iterations=max_iterations)
     return solver(prob).matrix
-
-def solve_nuclear_ot_sinkhorn(
-    C: jnp.ndarray,
-    g1: jnp.ndarray,
-    g2: jnp.ndarray,
-    k: jnp.int32, 
-    gamma: jnp.float32, 
-    max_iter: jnp.int32 = 100, 
-    tolerance: jnp.float32 = 1e-4, 
-    epsilon: jnp.float32 = 1e-3,
-    verbose: bool = False
-):
-    P2, D = jnp.ones_like(C), jnp.zeros_like(C)
-    iteration = 0
-    while iteration < max_iter:
-        start_time_entropy_ot = time.time()
-        P1 = sink_helper(C - D - jnp.log(P2), g1, g2, epsilon, min_iterations=0, max_iterations=500)
-        end_time_entropy_ot = time.time()
-
-        if verbose:
-            logger.info(f"Time for Entropy Regularized OT: {end_time_entropy_ot - start_time_entropy_ot}")
-            logger.info(f"Linear Objective (P1): {jnp.sum(C * P1)}")
-
-        start_time_nuc_proj = time.time()
-        P2 = 1 / (C.shape[0] * C.shape[1]) * jnp.ones_like(C)
-        P2 = entropy_regularized_nuclear_projection(C, P1, P2, D, gamma * k, iterations=1000)
-        end_time_nuc_proj = time.time()
-
-        if verbose:
-            logger.info(f"Time for Nuclear Projection: {end_time_nuc_proj - start_time_nuc_proj}")
-            logger.info(f"Linear Objective (P2): {jnp.sum(C * P2)}")
-
-        R  = P1 - P2
-        D  = D + R
-
-        iteration += 1
 
 def sinkhorn_rescaling(L, R, g1, g2, max_iter=1000, tol=1e-12):
     rescaling_rows = True
