@@ -70,6 +70,8 @@ if __name__ == "__main__":
             end_time   = time.time()
             round_time = end_time - start_time
             P_rounded = L @ R
+            P_rounded = clrot.sinkhorn_rescaling_P(P_rounded, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
+
             primal_cost = jnp.sum(C * P_rounded)
 
             l1_row_error = jnp.sum(jnp.abs(g1  - P_rounded.sum(axis=0)))
@@ -102,6 +104,8 @@ if __name__ == "__main__":
             solve_time = end_time - start_time
 
             P = P.cpu().numpy()
+            P = clrot.sinkhorn_rescaling_P(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
+
             l1_row_error = np.sum(np.abs(g1  - P.sum(axis=0)))
             l1_col_error = np.sum(np.abs(g2  - P.sum(axis=1)))
             l1_error     = np.sum(np.abs(1.0 - P.sum()))
@@ -133,6 +137,7 @@ if __name__ == "__main__":
         ot_lr = solver(ot_prob)
 
         P = ot_lr.matrix
+        P = clrot.sinkhorn_rescaling_P(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
         
         primal_cost  = jnp.sum(C * P)
         l1_row_error = jnp.sum(jnp.abs(g1  - P.sum(axis=0)))
@@ -172,6 +177,7 @@ if __name__ == "__main__":
             end_time   = time.time()
             round_time = end_time - start_time
             P_rounded = L @ R
+            P_rounded = clrot.sinkhorn_rescaling_P(P_rounded, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
             primal_cost = jnp.sum(C * P_rounded)
 
             l1_row_error = jnp.sum(jnp.abs(g1  - P_rounded.sum(axis=0)))

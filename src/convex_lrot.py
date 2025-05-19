@@ -187,7 +187,7 @@ def sinkhorn_rescaling(L, R, g1, g2, max_iter=1000, tol=1e-12):
             break
     return L, R
 
-def sinkhorn_rescaling_P(P, g1, g2, max_iter=1000, tol=1e-12):
+def sinkhorn_rescaling_P(P, g1, g2, max_iter=1000, tol=1e-6):
     rescaling_rows = True
     for _ in range(max_iter):
         if rescaling_rows:
@@ -201,8 +201,8 @@ def sinkhorn_rescaling_P(P, g1, g2, max_iter=1000, tol=1e-12):
             P = P @ rescaling_matrix
             rescaling_rows = True
 
-        norm1 = np.linalg.norm(P @ jnp.ones(P.shape[1]) - g1)
-        norm2 = np.linalg.norm(P.T @ jnp.ones(P.shape[0]) - g2)
+        norm1 = jnp.sum(jnp.abs(P @ jnp.ones(P.shape[1]) - g1))
+        norm2 = jnp.sum(jnp.abs(P.T @ jnp.ones(P.shape[0]) - g2))
         if norm1 < tol and norm2 < tol:
             break
     return P
