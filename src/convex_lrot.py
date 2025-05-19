@@ -96,8 +96,12 @@ def simplex_projection(X: jnp.ndarray, t: jnp.ndarray):
 def nuclear_projection(A):
     """Projection onto nuclear norm ball."""
     U, s, V = jnp.linalg.svd(A, full_matrices=False)
-    theta = simplex_projection(s[None,:], jnp.array([1.0]))[0]
-    s = jnp.maximum(s - theta, 0)
+    s = jax.lax.cond(
+        jnp.sum(s) <= 1,
+        lambda x: x,
+        lambda x: jnp.maximum(x - simplex_projection(x[None,:], jnp.array([1.0]))[0], 0),
+        s
+    )
     return U.dot(jnp.diag(s).dot(V))
 
 @jax.jit
@@ -108,7 +112,7 @@ def solve_euclidean_reg_ot(
     P1_alpha : jnp.ndarray,
     P2_beta : jnp.ndarray,
     rho: float = 100,
-    iterations: int = 10
+    iterations: int = 20
 ):
     alpha = P1_alpha
     beta  = P2_beta

@@ -2,22 +2,13 @@ import sys
 import math
 import random
 import torch
-import torchdyn
-import jax.numpy as jnp
 
-import pandas as pd
 import argparse as ap
 import numpy as np
 
-from loguru import logger
 from torchdyn.datasets import generate_moons
 from scipy.spatial import distance
 from ott.geometry import pointcloud, geometry
-
-sys.path.append("src")
-
-import FRLC.FRLC as frlc
-import convex_lrot as clrot
 
 def eight_normal_sample(n, dim, scale=1, var=1):
     m = torch.distributions.multivariate_normal.MultivariateNormal(
@@ -52,24 +43,12 @@ def sample_8gaussians(n):
 def parse_args():
     parser = ap.ArgumentParser()
     parser.add_argument("-n", "--n", type=int, default=100)
-    parser.add_argument("-r", "--rank", type=int, default=5)
-    parser.add_argument("-s", "--seed", type=int, default=0)
-    parser.add_argument("--restarts", type=int, default=10)
-    parser.add_argument("-a", "--algorithm", default="clrot", choices=["clrot", "frlc", "lot"])
-    parser.add_argument("--output", type=str, default="results")
+    parser.add_argument("-o", "--output", type=str, default=None)
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
-
-    # set random seed for reproducibility
-    torch.manual_seed(args.seed)
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype  = torch.float64
-
+ 
     batch_size1 = args.n
     batch_size2 = args.n
 
@@ -79,51 +58,10 @@ if __name__ == "__main__":
     x0 = sample_8gaussians(batch_size1)
     x1 = sample_moons(batch_size2)
 
-    C = torch.from_numpy(distance.cdist(x0, x1)).to(device)
+    C = distance.cdist(x0, x1)
     C = C / C.max()
 
-    rank = args.rank
-
-    results = []
-    if args.algorithm == "clrot":
-        gamma = (1.0 / args.n)
-        C = jnp.array(C.cpu().numpy())
-
-        P, objective_lb = clrot.solve_nuclear_ot(
-            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=500, tolerance=1e-4, verbose=True
-        )
-
-        for i in range(args.restarts):
-            L, R = clrot.nonnegative_rounding(P, g1, g2, rank, seed=args.seed + i)
-            P_rounded = L @ R
-            primal_cost = jnp.sum(C * P_rounded)
-
-            logger.info(f"CLROT objective: {objective_lb}, rounded objective: {primal_cost}")
-            results.append({
-                "objective_cost": float(primal_cost),
-                "lower_bound": objective_lb,
-                "rank": rank,
-                "simulation_seed": args.seed,
-                "num_restart": i,
-                "algorithm": args.algorithm,
-            })
-    elif args.algorithm == "frlc":
-        for i in range(args.restarts):
-            P, errs = frlc.FRLC_opt(
-                C, device=device, r=rank, max_iter=20, returnFull=True, gamma=70, max_inneriters_balanced=500, max_inneriters_relaxed=500
-            )
-
-            primal_cost = torch.sum(C * P)
-            logger.info(f"FRLC objective: {primal_cost}")
-            results.append({
-                "objective_cost": float(primal_cost),
-                "lower_bound": None,
-                "rank": rank,
-                "simulation_seed": args.seed,
-                "num_restart": i,
-                "algorithm": args.algorithm,
-            })
-
-    results = pd.DataFrame(results)
-    results.to_csv(f"{args.output}", index=False)
-            
+    if args.output is None:
+        np.savetxt(sys.stdout, C, fmt='%.4f')
+    else:
+        np.savetxt(args.output, C, fmt='%.4f')
