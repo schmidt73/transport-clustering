@@ -3,6 +3,7 @@ import math
 import random
 import torch
 import torchdyn
+import jax.numpy as jnp
 
 import pandas as pd
 import argparse as ap
@@ -86,14 +87,16 @@ if __name__ == "__main__":
     results = []
     if args.algorithm == "clrot":
         gamma = (1.0 / args.n)
+        C = jnp.array(C.cpu().numpy())
+
         P, objective_lb = clrot.solve_nuclear_ot(
-            C.cpu().numpy(), g1, g2, k=rank, gamma=gamma, max_iter=250, tolerance=1e-4, verbose=True
+            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=500, tolerance=1e-4, verbose=True
         )
 
         for i in range(args.restarts):
             L, R = clrot.nonnegative_rounding(P, g1, g2, rank, seed=args.seed + i)
             P_rounded = L @ R
-            primal_cost = torch.sum(C * P_rounded)
+            primal_cost = jnp.sum(C * P_rounded)
 
             logger.info(f"CLROT objective: {objective_lb}, rounded objective: {primal_cost}")
             results.append({

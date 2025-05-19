@@ -164,43 +164,29 @@ def solve_nuclear_ot(
 
     return P1, np.sum(C * P1)
 
-#@jax.jit
-def sink_helper(
-    C, g1, g2, epsilon, min_iterations, max_iterations
-):
-    geom = geometry.Geometry(cost_matrix=C, epsilon=epsilon)
-    prob = linear_problem.LinearProblem(geom, g1, g2)
-    solver = sinkhorn.Sinkhorn(min_iterations=min_iterations, max_iterations=max_iterations)
-    return solver(prob).matrix
-
 def sinkhorn_rescaling(L, R, g1, g2, max_iter=1000, tol=1e-12):
     rescaling_rows = True
-    singular_values = []
     for _ in range(max_iter):
         if rescaling_rows:
-            row_sum = L @ R @ np.ones(R.shape[1])
-            rescaling_matrix = np.diag(g1 / row_sum)
+            row_sum = L @ R @ jnp.ones(R.shape[1])
+            rescaling_matrix = jnp.diag(g1 / row_sum)
             L = rescaling_matrix @ L
             rescaling_rows = False
         else:
-            col_sum = R.T @ L.T @ np.ones(L.shape[0])
-            rescaling_matrix = np.diag(g2 / col_sum)
+            col_sum = R.T @ L.T @ jnp.ones(L.shape[0])
+            rescaling_matrix = jnp.diag(g2 / col_sum)
             R = R @ rescaling_matrix
             rescaling_rows = True
 
-        # for understanding
-        svs = np.linalg.svd(L @ R, compute_uv=False)
-        singular_values.append(svs)
-
-        norm1 = np.linalg.norm(L @ R @ np.ones(R.shape[1]) - g1)
-        norm2 = np.linalg.norm(R.T @ L.T @ np.ones(L.shape[0]) - g2)
+        norm1 = np.linalg.norm(L @ R @ jnp.ones(R.shape[1]) - g1)
+        norm2 = np.linalg.norm(R.T @ L.T @ jnp.ones(L.shape[0]) - g2)
         if norm1 < tol and norm2 < tol:
             break
-    return L, R, singular_values
+    return L, R
 
 def nonnegative_rounding(P, g1, g2, k, seed=0):
     model = NMF(n_components=k, init='random', random_state=seed, max_iter=10000, solver='mu', beta_loss='frobenius')
     W = model.fit_transform(P)
     H = model.components_
-    L_round, R_round, singular_values = sinkhorn_rescaling(W, H, g1, g2)
-    return L_round, R_round, np.array(singular_values)
+    L_round, R_round = sinkhorn_rescaling(W, H, g1, g2)
+    return L_round, R_round
