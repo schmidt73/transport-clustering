@@ -187,6 +187,26 @@ def sinkhorn_rescaling(L, R, g1, g2, max_iter=1000, tol=1e-12):
             break
     return L, R
 
+def sinkhorn_rescaling_P(P, g1, g2, max_iter=1000, tol=1e-12):
+    rescaling_rows = True
+    for _ in range(max_iter):
+        if rescaling_rows:
+            row_sum = P @ jnp.ones(P.shape[1])
+            rescaling_matrix = jnp.diag(g1 / row_sum)
+            P = rescaling_matrix @ P
+            rescaling_rows = False
+        else:
+            col_sum = P.T @ jnp.ones(P.shape[0])
+            rescaling_matrix = jnp.diag(g2 / col_sum)
+            P = P @ rescaling_matrix
+            rescaling_rows = True
+
+        norm1 = np.linalg.norm(P @ jnp.ones(P.shape[1]) - g1)
+        norm2 = np.linalg.norm(P.T @ jnp.ones(P.shape[0]) - g2)
+        if norm1 < tol and norm2 < tol:
+            break
+    return P
+
 def nonnegative_rounding(P, g1, g2, k, seed=0):
     model = NMF(n_components=k, init='random', random_state=seed, max_iter=10000, solver='mu', beta_loss='frobenius')
     W = model.fit_transform(P)

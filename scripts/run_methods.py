@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument("-r", "--rank", type=int, default=5)
     parser.add_argument("-s", "--seed", type=int, default=0)
     parser.add_argument("-o", "--output", type=str, default="results")
-    parser.add_argument("-a", "--algorithm", default="clrot", choices=["clrot", "frlc", "lot", "fullrank_round"])
+    parser.add_argument("-a", "--algorithm", default="clrot", choices=["clrot", "frlc", "lot", "fullrankround"])
     parser.add_argument("--restarts", type=int, default=10)
     return parser.parse_args()
 
@@ -59,7 +59,7 @@ if __name__ == "__main__":
 
         start_time = time.time()
         P, objective_lb = clrot.solve_nuclear_ot(
-            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=500, tolerance=1e-4, verbose=True
+            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=200, tolerance=1e-4, verbose=True
         )
         end_time   = time.time()
         solve_time = end_time - start_time
@@ -92,7 +92,7 @@ if __name__ == "__main__":
 
             results.append(res)
     elif args.algorithm == "frlc":
-        C = torch.from_numpy(C)
+        C = torch.from_numpy(C).to(device)
         for i in range(args.restarts):
             start_time = time.time()
             P, errs = frlc.FRLC_opt(
@@ -101,12 +101,12 @@ if __name__ == "__main__":
             end_time   = time.time()
             solve_time = end_time - start_time
 
-            P = P.numpy()
+            P = P.cpu().numpy()
             l1_row_error = np.sum(np.abs(g1  - P.sum(axis=0)))
             l1_col_error = np.sum(np.abs(g2  - P.sum(axis=1)))
             l1_error     = np.sum(np.abs(1.0 - P.sum()))
 
-            primal_cost = torch.sum(C * P)
+            primal_cost = np.sum(C.cpu().numpy() * P)
             logger.info(f"FRLC objective: {primal_cost}")
             res = {
                 "objective_cost": float(primal_cost),
@@ -154,7 +154,7 @@ if __name__ == "__main__":
 
         print(res)
         results.append(res)
-    elif args.algorithm == "fullrank_round":
+    elif args.algorithm == "fullrankround":
         geom = Geometry(cost_matrix=C, epsilon=0.001)
 
         ot_prob = linear_problem.LinearProblem(geom, g1, g2)
