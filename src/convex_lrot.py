@@ -5,7 +5,6 @@ import jax
 import jax.numpy as jnp
 import cvxpy as cp
 import numpy as np
-import gurobipy as gp
 
 from ott.geometry import geometry, pointcloud
 from ott.problems.linear import linear_problem
@@ -17,7 +16,7 @@ def solve_linear_ot_cvxpy(
     C: np.ndarray, 
     g1: np.ndarray, 
     g2: np.ndarray, 
-    solver: str = "GUROBI"
+    solver: str = "MOSEK"
 ):
     m, n = C.shape
     if g1.shape != (m,) or g2.shape != (n,):

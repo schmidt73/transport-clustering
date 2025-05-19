@@ -15,7 +15,7 @@ from ott.problems.linear import linear_problem
 from ott.solvers.linear import sinkhorn, sinkhorn_lr
 from loguru import logger
 
-sys.path.append("src")
+sys.path.append("../src")
 
 import FRLC.FRLC as frlc
 import convex_lrot as clrot
@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument("-r", "--rank", type=int, default=5)
     parser.add_argument("-s", "--seed", type=int, default=0)
     parser.add_argument("-o", "--output", type=str, default="results")
-    parser.add_argument("-a", "--algorithm", default="clrot", choices=["clrot", "frlc", "lot"])
+    parser.add_argument("-a", "--algorithm", default="clrot", choices=["clrot", "frlc", "lot", "fullrank_round"])
     parser.add_argument("--restarts", type=int, default=10)
     return parser.parse_args()
 
@@ -154,6 +154,44 @@ if __name__ == "__main__":
 
         print(res)
         results.append(res)
+    elif args.algorithm == "fullrank_round":
+        geom = Geometry(cost_matrix=C, epsilon=0.001)
+
+        ot_prob = linear_problem.LinearProblem(geom, g1, g2)
+        start_time = time.time()
+        solver = sinkhorn.Sinkhorn()
+        end_time = time.time()
+        solve_time = end_time - start_time
+        ot_result = solver(ot_prob)
+
+        P = ot_result.matrix
+        
+        for i in range(args.restarts):
+            start_time = time.time()
+            L, R = clrot.nonnegative_rounding(P, g1, g2, rank, seed=args.seed + i)
+            end_time   = time.time()
+            round_time = end_time - start_time
+            P_rounded = L @ R
+            primal_cost = jnp.sum(C * P_rounded)
+
+            l1_row_error = jnp.sum(jnp.abs(g1  - P_rounded.sum(axis=0)))
+            l1_col_error = jnp.sum(jnp.abs(g2  - P_rounded.sum(axis=1)))
+            l1_error     = jnp.sum(jnp.abs(1.0 - P_rounded.sum()))
+
+            res = {
+                "objective_cost": float(primal_cost),
+                "lower_bound": None,
+                "rank": rank,
+                "simulation_seed": args.seed,
+                "num_restart": i,
+                "algorithm": args.algorithm,
+                "l1_row_marginal_error": l1_row_error,
+                "l1_col_marginal_error": l1_col_error,
+                "l1_total_error": l1_error,
+                "runtime": solve_time + round_time
+            }
+
+            results.append(res)
 
     results = pd.DataFrame(results)
     results.to_csv(f"{args.output}", index=False)

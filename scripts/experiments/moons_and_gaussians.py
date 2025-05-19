@@ -43,11 +43,16 @@ def sample_8gaussians(n):
 def parse_args():
     parser = ap.ArgumentParser()
     parser.add_argument("-n", "--n", type=int, default=100)
+    parser.add_argument("-s", "--seed", type=int, default=0)
     parser.add_argument("-o", "--output", type=str, default=None)
     return parser.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
+
+    torch.manual_seed(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
  
     batch_size1 = args.n
     batch_size2 = args.n
