@@ -1,6 +1,6 @@
 nextflow.enable.dsl=2
 
-params.proj_dir         = "/Users/schmidt73/Desktop/convexified-low-rank-ot"
+params.proj_dir         = "/n/fs/ragr-research/projects/convex_lrot"
 params.two_moons_script = "${params.proj_dir}/scripts/experiments/moons_and_gaussians.py"
 
 params.seeds      = [1, 2, 3]
