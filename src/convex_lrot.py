@@ -11,6 +11,7 @@ from ott.problems.linear import linear_problem
 from ott.solvers.linear import sinkhorn
 from loguru import logger
 from sklearn.decomposition import NMF
+import optax
 
 def solve_linear_ot_cvxpy(
     C: np.ndarray, 
@@ -126,6 +127,106 @@ def solve_euclidean_reg_ot(
     P = jnp.maximum(-(C + alpha[:, None] + beta[None, :]), 0) / rho
     return P, alpha, beta
 
+def kullback_leibler_divergence(P, Q):
+    """
+    Computes the Kullback-Leibler divergence between two positive matrices P and Q.
+    """
+    return jnp.sum(P * jnp.log(P / Q)) + jnp.sum(Q - P)
+
+def initialize_factors(C, g1, g2, rank):
+    """
+    Uses a Scetbon-style initialization for the factors L and R.
+    """
+    rng = jax.random.PRNGKey(0)
+    n, m = C.shape
+
+    init_q = jnp.abs(jax.random.normal(rng, (n, rank)))
+    init_q = g1[:, None] * (init_q / jnp.sum(init_q, axis=1, keepdims=True))
+
+    init_r = jnp.abs(jax.random.normal(rng, (m, rank)))
+    init_r = g2[:, None] * (init_r / jnp.sum(init_r, axis=1, keepdims=True))
+
+    init_g = jnp.abs(jax.random.uniform(rng, (rank,))) + 1.0
+    init_g =  init_g / jnp.sum(init_g)
+
+    L = init_q @ jnp.diag(1 / jnp.sqrt(init_g))
+    R = jnp.diag(1 / jnp.sqrt(init_g)) @ init_r.T
+    return L, R
+
+def alternating_mirror_descent_low_rank_ot(
+    C: jnp.ndarray, 
+    g1: jnp.ndarray, 
+    g2: jnp.ndarray, 
+    rank : int,
+    rho: float = 0.01
+):
+    n, m = C.shape
+    if g1.shape != (n,) or g2.shape != (m,):
+        raise ValueError("Dimension mismatch between C, g1, and g2.")
+    
+    L, R = initialize_factors(C, g1, g2, rank)
+    L, R = sinkhorn_rescaling(L, R, g1, g2)
+
+    ones_n = jnp.ones(n).reshape(-1, 1)
+    ones_m = jnp.ones(m).reshape(-1, 1)
+
+    logger.info(f"Initial objective: {jnp.sum(C * (L @ R)) + rho * kullback_leibler_divergence(L, L)}")
+    print(jnp.sum(jnp.abs((L @ R) @ ones_m - g1.reshape(-1, 1))))
+    print(jnp.sum(jnp.abs((R.T @ L.T) @ ones_n - g2.reshape(-1, 1))))
+
+    def compute_L(alpha, beta, L, R):
+        """ 
+        Computes dual optimal solution L given dual variables alpha and beta,
+        where L and R are the current iterates.
+        """
+        L_res = L * jnp.exp((1 / rho) * (ones_n @ beta.T @ R.T + alpha @ ones_m.T @ R.T - C @ R.T))
+        return L_res
+    
+    @jax.jit
+    def compute_loss(params, args):
+        alpha, beta = params
+        L_prev, R_prev = args
+        L = compute_L(alpha, beta, L_prev, R_prev)
+        primal_cost = jnp.sum((C @ R_prev.T) * L) + rho * kullback_leibler_divergence(L, L_prev)
+        lagrangian_penalty = alpha.T @ (L @ R_prev @ ones_m - g1.reshape(-1, 1)) + beta.T @ (R_prev.T @ L.T @ ones_n - g2.reshape(-1, 1))
+        loss = (primal_cost - lagrangian_penalty[0,0])
+        return loss
+     
+    value_and_grad_fn = jax.value_and_grad(compute_loss)
+    
+    optimizer = optax.chain(
+        optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-8),
+        optax.scale(0.001)
+    )
+
+    alpha = jnp.zeros(n).reshape(-1, 1)
+    beta = jnp.zeros(m).reshape(-1, 1)
+    init_params = (alpha, beta)
+    params = (alpha, beta)
+    opt_state = optimizer.init(init_params)
+
+    for i in range(10000): 
+        loss, grads = value_and_grad_fn(params, (L, R))
+        updates, opt_state = optimizer.update(grads, opt_state)
+        params = optax.apply_updates(params, updates)
+        if i % 100 == 0:
+            grad_norm = jnp.linalg.norm(grads[0]) + jnp.linalg.norm(grads[1])
+            logger.info(f"Iteration {i}, Loss: {loss}, Grad Norm: {grad_norm}")
+            if grad_norm < 1e-5:
+                logger.info("Converged!")
+                break
+    
+    # Extract optimized dual variables
+    alpha, beta = params
+    print(alpha)
+    print(beta)
+    L_new = compute_L(alpha, beta, L, R)
+    L, R = sinkhorn_rescaling(L_new, R, g1, g2)
+    logger.info(f"Final objective: {jnp.sum(C * (L_new @ R)) + rho * kullback_leibler_divergence(L_new, L)}")
+    #print((L_new @ R))
+    print(jnp.sum(jnp.abs((L_new @ R) @ ones_m - g1.reshape(-1, 1))))
+    print(jnp.sum(jnp.abs((R.T @ L_new.T) @ ones_n - g2.reshape(-1, 1))))
+        
 def solve_nuclear_ot(
     C: jnp.ndarray, 
     g1: jnp.ndarray, 
@@ -167,7 +268,8 @@ def solve_nuclear_ot(
 
     return P1, np.sum(C * P1)
 
-def sinkhorn_rescaling(L, R, g1, g2, max_iter=1000, tol=1e-12):
+@jax.jit
+def sinkhorn_rescaling(L, R, g1, g2, max_iter=5, tol=1e-12):
     rescaling_rows = True
     for _ in range(max_iter):
         if rescaling_rows:
@@ -181,10 +283,10 @@ def sinkhorn_rescaling(L, R, g1, g2, max_iter=1000, tol=1e-12):
             R = R @ rescaling_matrix
             rescaling_rows = True
 
-        norm1 = np.linalg.norm(L @ R @ jnp.ones(R.shape[1]) - g1)
-        norm2 = np.linalg.norm(R.T @ L.T @ jnp.ones(L.shape[0]) - g2)
-        if norm1 < tol and norm2 < tol:
-            break
+        # norm1 = jnp.linalg.norm(L @ R @ jnp.ones(R.shape[1]) - g1)
+        # norm2 = jnp.linalg.norm(R.T @ L.T @ jnp.ones(L.shape[0]) - g2)
+        # if norm1 < tol and norm2 < tol:
+        #     break
     return L, R
 
 def sinkhorn_rescaling_P(P, g1, g2, max_iter=1000, tol=1e-6):
@@ -208,8 +310,13 @@ def sinkhorn_rescaling_P(P, g1, g2, max_iter=1000, tol=1e-6):
     return P
 
 def nonnegative_rounding(P, g1, g2, k, seed=0):
+    U, s, Vt = jnp.linalg.svd(P)
+    print(s[:25])
+    s = s.at[k:].set(0)
+    print(s[:25])
+    P_svd = U @ jnp.diag(s) @ Vt
     model = NMF(n_components=k, init='random', random_state=seed, max_iter=10000, solver='mu', beta_loss='frobenius')
     W = model.fit_transform(P)
     H = model.components_
     L_round, R_round = sinkhorn_rescaling(W, H, g1, g2)
-    return L_round, R_round
+    return L_round, R_round, P_svd
