@@ -12,6 +12,7 @@ from ott.solvers.linear import sinkhorn
 from loguru import logger
 from sklearn.decomposition import NMF
 import optax
+import enum
 
 def solve_linear_ot_cvxpy(
     C: np.ndarray, 
@@ -127,6 +128,10 @@ def solve_euclidean_reg_ot(
     P = jnp.maximum(-(C + alpha[:, None] + beta[None, :]), 0) / rho
     return P, alpha, beta
 
+class MirrorDescentStepType(enum.Enum):
+    L_STEP = "L_STEP"
+    R_STEP = "R_STEP"
+
 def kullback_leibler_divergence(P, Q):
     """
     Computes the Kullback-Leibler divergence between two positive matrices P and Q.
@@ -153,19 +158,108 @@ def initialize_factors(C, g1, g2, rank):
     R = jnp.diag(1 / jnp.sqrt(init_g)) @ init_r.T
     return L, R
 
+def alternating_mirror_descent_compute_L(C, rho, L, R, alpha, beta):
+    """ 
+    Computes dual optimal solution L^* given dual variables alpha and beta,
+    where L and R are the current iterates.
+    """
+    n, m = C.shape
+    ones_n = jnp.ones(n).reshape(-1, 1)
+    ones_m = jnp.ones(m).reshape(-1, 1)
+    L_res = L * jnp.exp((1 / rho) * (ones_n @ beta.T + alpha @ ones_m.T - C) @ R.T)
+    return L_res
+
+def alternating_mirror_descent_compute_R(C, rho, L, R, alpha, beta):
+    """ 
+    Computes dual optimal solution R^* given dual variables alpha and beta,
+    where L and R are the current iterates.
+    """
+    n, m = C.shape
+    ones_n = jnp.ones(n).reshape(-1, 1)
+    ones_m = jnp.ones(m).reshape(-1, 1)
+    R_res = R * jnp.exp((1 / rho) * L.T @ (alpha @ ones_m.T + ones_n @ beta.T - C))
+    return R_res
+
+def alternating_mirror_descent_step(
+    C: jnp.ndarray, 
+    g1: jnp.ndarray,
+    g2: jnp.ndarray,
+    rho: float, 
+    L: jnp.ndarray, 
+    R: jnp.ndarray, 
+    step_type: MirrorDescentStepType,
+    max_iter: int = 50,
+):
+    n, m = C.shape
+    ones_n = jnp.ones(n).reshape(-1, 1)
+    ones_m = jnp.ones(m).reshape(-1, 1)
+
+    def compute_loss(params, args):
+        alpha, beta = params
+        L_prev, R_prev = args
+        
+        if step_type == MirrorDescentStepType.L_STEP:
+            L = alternating_mirror_descent_compute_L(C, rho, L_prev, R_prev, alpha, beta)
+            R = R_prev
+        else:
+            R = alternating_mirror_descent_compute_R(C, rho, L_prev, R_prev, alpha, beta)
+            L = L_prev
+
+        primal_cost = jnp.sum((C @ R.T) * L) + rho * kullback_leibler_divergence(L, L_prev)
+        lagrangian_penalty_1 = alpha.T @ (L @ R @ ones_m - g1.reshape(-1, 1))
+        lagrangian_penalty_2 = beta.T @ (R.T @ L.T @ ones_n - g2.reshape(-1, 1))
+        loss = (primal_cost - (lagrangian_penalty_1 + lagrangian_penalty_2)[0,0])
+
+        return -loss
+    
+    value_and_grad_fn = jax.value_and_grad(compute_loss)
+
+    def step(params, opt_state, args):
+        loss, grads = value_and_grad_fn(params, args)
+        updates, opt_state = optimizer.update(
+            grads, opt_state, params, 
+            value=loss, grad=grads, 
+            value_fn=compute_loss,
+            args=args
+        )
+        params = optax.apply_updates(params, updates)
+        return params, opt_state, grads, loss
+    
+    step = jax.jit(step)
+
+    # setup optimizer
+    linesearch = optax.scale_by_backtracking_linesearch(max_backtracking_steps=15)
+    optimizer = optax.chain(optax.lbfgs(), linesearch)
+
+    # initialize parameters
+    alpha = (1 / n) * jnp.ones(n).reshape(-1, 1)
+    beta = (1 / m) * jnp.ones(m).reshape(-1, 1)
+    init_params = (alpha, beta)
+    params = (alpha, beta)
+    opt_state = optimizer.init(init_params)
+
+    for i in range(max_iter): 
+        params, opt_state, grads, loss = step(params, opt_state, (L, R))
+        grad_norm = jnp.linalg.norm(grads[0]) + jnp.linalg.norm(grads[1])
+        logger.info(f"Iteration {i}, Loss: {loss}, Grad Norm: {grad_norm}")
+        if grad_norm < 1e-5:
+            break
+
+    return params
+
 def alternating_mirror_descent_low_rank_ot(
     C: jnp.ndarray, 
     g1: jnp.ndarray, 
     g2: jnp.ndarray, 
     rank : int,
-    rho: float = 0.01
+    rho: float = 0.05
 ):
     n, m = C.shape
     if g1.shape != (n,) or g2.shape != (m,):
         raise ValueError("Dimension mismatch between C, g1, and g2.")
     
     L, R = initialize_factors(C, g1, g2, rank)
-    L, R = sinkhorn_rescaling(L, R, g1, g2)
+    # L, R = sinkhorn_rescaling(L, R, g1, g2)
 
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
@@ -173,59 +267,23 @@ def alternating_mirror_descent_low_rank_ot(
     logger.info(f"Initial objective: {jnp.sum(C * (L @ R)) + rho * kullback_leibler_divergence(L, L)}")
     print(jnp.sum(jnp.abs((L @ R) @ ones_m - g1.reshape(-1, 1))))
     print(jnp.sum(jnp.abs((R.T @ L.T) @ ones_n - g2.reshape(-1, 1))))
-
-    def compute_L(alpha, beta, L, R):
-        """ 
-        Computes dual optimal solution L given dual variables alpha and beta,
-        where L and R are the current iterates.
-        """
-        L_res = L * jnp.exp((1 / rho) * (ones_n @ beta.T @ R.T + alpha @ ones_m.T @ R.T - C @ R.T))
-        return L_res
     
-    @jax.jit
-    def compute_loss(params, args):
-        alpha, beta = params
-        L_prev, R_prev = args
-        L = compute_L(alpha, beta, L_prev, R_prev)
-        primal_cost = jnp.sum((C @ R_prev.T) * L) + rho * kullback_leibler_divergence(L, L_prev)
-        lagrangian_penalty = alpha.T @ (L @ R_prev @ ones_m - g1.reshape(-1, 1)) + beta.T @ (R_prev.T @ L.T @ ones_n - g2.reshape(-1, 1))
-        loss = (primal_cost - lagrangian_penalty[0,0])
-        return loss
-     
-    value_and_grad_fn = jax.value_and_grad(compute_loss)
-    
-    optimizer = optax.chain(
-        optax.scale_by_adam(b1=0.9, b2=0.999, eps=1e-8),
-        optax.scale(0.001)
-    )
+    for i in range(100):
+        step_type = MirrorDescentStepType.L_STEP if i % 2 == 0 else MirrorDescentStepType.R_STEP
 
-    alpha = jnp.zeros(n).reshape(-1, 1)
-    beta = jnp.zeros(m).reshape(-1, 1)
-    init_params = (alpha, beta)
-    params = (alpha, beta)
-    opt_state = optimizer.init(init_params)
+        alpha, beta = alternating_mirror_descent_step(C, g1, g2, rho, L, R, step_type)
 
-    for i in range(10000): 
-        loss, grads = value_and_grad_fn(params, (L, R))
-        updates, opt_state = optimizer.update(grads, opt_state)
-        params = optax.apply_updates(params, updates)
-        if i % 100 == 0:
-            grad_norm = jnp.linalg.norm(grads[0]) + jnp.linalg.norm(grads[1])
-            logger.info(f"Iteration {i}, Loss: {loss}, Grad Norm: {grad_norm}")
-            if grad_norm < 1e-5:
-                logger.info("Converged!")
-                break
-    
-    # Extract optimized dual variables
-    alpha, beta = params
-    print(alpha)
-    print(beta)
-    L_new = compute_L(alpha, beta, L, R)
-    L, R = sinkhorn_rescaling(L_new, R, g1, g2)
-    logger.info(f"Final objective: {jnp.sum(C * (L_new @ R)) + rho * kullback_leibler_divergence(L_new, L)}")
-    #print((L_new @ R))
-    print(jnp.sum(jnp.abs((L_new @ R) @ ones_m - g1.reshape(-1, 1))))
-    print(jnp.sum(jnp.abs((R.T @ L_new.T) @ ones_n - g2.reshape(-1, 1))))
+        if step_type == MirrorDescentStepType.R_STEP:
+            R = alternating_mirror_descent_compute_R(C, rho, L, R, alpha, beta)
+        else:
+            L = alternating_mirror_descent_compute_L(C, rho, L, R, alpha, beta)
+
+        logger.info(f"Objective: {jnp.sum(C * (L @ R))}")
+        L, R = sinkhorn_rescaling(L, R, g1, g2)
+
+        print(jnp.sum(jnp.abs((L @ R) @ ones_m - g1.reshape(-1, 1))))
+        print(jnp.sum(jnp.abs((R.T @ L.T) @ ones_n - g2.reshape(-1, 1))))
+    return L, R
         
 def solve_nuclear_ot(
     C: jnp.ndarray, 
