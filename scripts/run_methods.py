@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument("-r", "--rank", type=int, default=5)
     parser.add_argument("-s", "--seed", type=int, default=0)
     parser.add_argument("-o", "--output", type=str, default="results")
-    parser.add_argument("-a", "--algorithm", default="clrot", choices=["clrot", "frlc", "lot", "fullrankround"])
+    parser.add_argument("-a", "--algorithm", default="clrot", choices=["clrot", "amdlot", "frlc", "lot", "fullrankround"])
     parser.add_argument("--restarts", type=int, default=10)
     return parser.parse_args()
 
@@ -59,29 +59,63 @@ if __name__ == "__main__":
 
         start_time = time.time()
         P, objective_lb = clrot.solve_nuclear_ot(
-            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=200, tolerance=1e-4, verbose=True
+            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=25, tolerance=1e-4, verbose=True
         )
         end_time   = time.time()
         solve_time = end_time - start_time
 
         for i in range(args.restarts):
             start_time = time.time()
-            L, R = clrot.nonnegative_rounding(P, g1, g2, rank, seed=args.seed + i)
+            L, R, P_svd = clrot.nonnegative_rounding(P, g1, g2, rank, seed=args.seed + i)
             end_time   = time.time()
             round_time = end_time - start_time
             P_rounded = L @ R
             P_rounded = clrot.sinkhorn_rescaling_P(P_rounded, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
 
             primal_cost = jnp.sum(C * P_rounded)
-
-            l1_row_error = jnp.sum(jnp.abs(g1  - P_rounded.sum(axis=0)))
-            l1_col_error = jnp.sum(jnp.abs(g2  - P_rounded.sum(axis=1)))
-            l1_error     = jnp.sum(jnp.abs(1.0 - P_rounded.sum()))
+            l1_row_error = jnp.sum(jnp.abs(g1  - P_svd.sum(axis=0)))
+            l1_col_error = jnp.sum(jnp.abs(g2  - P_svd.sum(axis=1)))
+            l1_error     = jnp.sum(jnp.abs(1.0 - P_svd.sum()))
 
             logger.info(f"CLROT objective: {objective_lb}, rounded objective: {primal_cost}")
             res = {
                 "objective_cost": float(primal_cost),
                 "lower_bound": objective_lb,
+                "rank": rank,
+                "simulation_seed": args.seed,
+                "num_restart": i,
+                "algorithm": args.algorithm,
+                "l1_row_marginal_error": l1_row_error,
+                "l1_col_marginal_error": l1_col_error,
+                "l1_total_error": l1_error,
+                "runtime": solve_time + round_time
+            }
+
+            results.append(res)
+    elif args.algorithm == "amdlot":
+        gamma = (1.0 / min(batch_size1, batch_size2))
+        C = jnp.array(C)
+
+        for i in range(args.restarts):
+            start_time = time.time()
+            L, R = clrot.alternating_mirror_descent_low_rank_ot(
+                C, jnp.array(g1), jnp.array(g2), rank, rho=0.01, seed=args.seed + i,
+            )
+            end_time   = time.time()
+            solve_time = end_time - start_time
+            round_time = end_time - start_time
+            P = L @ R
+            P = clrot.sinkhorn_rescaling_P(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
+
+            primal_cost = jnp.sum(C * P)
+            l1_row_error = jnp.sum(jnp.abs(g1  - P.sum(axis=0)))
+            l1_col_error = jnp.sum(jnp.abs(g2  - P.sum(axis=1)))
+            l1_error     = jnp.sum(jnp.abs(1.0 - P.sum()))
+
+            logger.info(f"ADMLOT objective: {primal_cost}")
+            res = {
+                "objective_cost": float(primal_cost),
+                "lower_bound": None,
                 "rank": rank,
                 "simulation_seed": args.seed,
                 "num_restart": i,

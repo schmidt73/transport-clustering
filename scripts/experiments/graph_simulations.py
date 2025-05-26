@@ -19,7 +19,7 @@ def build_random_weighted_graph(n: int,
                                 w_high: float = 10.0,
                                 seed: int | None = None) -> nx.Graph:
     """Erdős–Rényi G(n,p) graph with i.i.d. edge weights ∼ U[w_low, w_high)."""
-    G = nx.gnp_random_graph(n, p, seed=seed, directed=False)
+    G = nx.random_regular_graph(int(n * p), n, seed=seed)#, directed=False)
     rng = np.random.default_rng(seed)
     for u, v in G.edges():
         G[u][v]["weight"] = rng.uniform(w_low, w_high)

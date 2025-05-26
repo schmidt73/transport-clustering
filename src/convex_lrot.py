@@ -1,6 +1,7 @@
 import time
 import os
 import jax
+jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import cvxpy as cp
@@ -132,17 +133,11 @@ class MirrorDescentStepType(enum.Enum):
     L_STEP = "L_STEP"
     R_STEP = "R_STEP"
 
-def kullback_leibler_divergence(P, Q):
+def initialize_factors(C, g1, g2, rank, seed=0):
     """
-    Computes the Kullback-Leibler divergence between two positive matrices P and Q.
+    Uses a Scetbon-style random initialization for the factors L and R.
     """
-    return jnp.sum(P * jnp.log(P / Q)) + jnp.sum(Q - P)
-
-def initialize_factors(C, g1, g2, rank):
-    """
-    Uses a Scetbon-style initialization for the factors L and R.
-    """
-    rng = jax.random.PRNGKey(0)
+    rng = jax.random.PRNGKey(seed)
     n, m = C.shape
 
     init_q = jnp.abs(jax.random.normal(rng, (n, rank)))
@@ -180,6 +175,56 @@ def alternating_mirror_descent_compute_R(C, rho, L, R, alpha, beta):
     R_res = R * jnp.exp((1 / rho) * L.T @ (alpha @ ones_m.T + ones_n @ beta.T - C))
     return R_res
 
+def alternating_mirror_descent_compute_compute_loss(step_type, params, args):
+    """
+    Computes the dual loss for a given set of dual variables (alpha, beta) where
+    the current iterates are L and R.
+    """
+    alpha, beta = params
+    L_prev, R_prev, C, g1, g2, rho = args
+    n, m = C.shape
+    ones_n = jnp.ones(n).reshape(-1, 1)
+    ones_m = jnp.ones(m).reshape(-1, 1)
+    
+    if step_type == MirrorDescentStepType.L_STEP:
+        L = alternating_mirror_descent_compute_L(C, rho, L_prev, R_prev, alpha, beta)
+        R = R_prev
+        kl_term =  jnp.sum(L * (((1 / rho) * (ones_n @ beta.T + alpha @ ones_m.T - C) @ R_prev.T)))
+        kl_term += jnp.sum(L_prev - L)
+    else:
+        R = alternating_mirror_descent_compute_R(C, rho, L_prev, R_prev, alpha, beta)
+        L = L_prev
+        kl_term =  jnp.sum(R * ((1 / rho) * L.T @ (alpha @ ones_m.T + ones_n @ beta.T - C)))
+        kl_term += jnp.sum(R_prev - R)
+
+    primal_cost = jnp.sum((C @ R.T) * L) + rho * kl_term
+    lagrangian_penalty_1 = alpha.T @ (L @ R @ ones_m - g1.reshape(-1, 1))
+    lagrangian_penalty_2 = beta.T @ (R.T @ L.T @ ones_n - g2.reshape(-1, 1))
+    loss = (primal_cost - (lagrangian_penalty_1 + lagrangian_penalty_2)[0,0])
+    return -loss
+
+alternating_md_compute_compute_loss_grad = jax.value_and_grad(
+    alternating_mirror_descent_compute_compute_loss,
+    argnums=1
+)
+
+alternating_md_linesearch = optax.scale_by_backtracking_linesearch(max_backtracking_steps=15)
+alternating_md_optimizer  = optax.chain(optax.lbfgs(), alternating_md_linesearch)
+
+def alternating_mirror_descent_single_step(step_type, params, opt_state, args):
+    value_fn = lambda p: alternating_mirror_descent_compute_compute_loss(step_type, p, args)
+    loss, grads = alternating_md_compute_compute_loss_grad(step_type, params, args)
+    updates, opt_state = alternating_md_optimizer.update(
+        grads, opt_state, params, 
+        value=loss, grad=grads, 
+        value_fn=value_fn,
+        args=args
+    )
+    params = optax.apply_updates(params, updates)
+    return params, opt_state, grads, loss
+
+alternating_mirror_descent_single_step = jax.jit(alternating_mirror_descent_single_step, static_argnums=[0])
+
 def alternating_mirror_descent_step(
     C: jnp.ndarray, 
     g1: jnp.ndarray,
@@ -190,59 +235,30 @@ def alternating_mirror_descent_step(
     step_type: MirrorDescentStepType,
     max_iter: int = 50,
 ):
+    """
+    Solves the alternating mirror descent step for the L factor (resp.
+    R factor):
+            min_{L} <C, L @ R>_F + (rho / 2) * KL(L || L_prev)
+    by solving the unconstrained dual problem for the dual variables 
+    alpha and beta.
+    """
     n, m = C.shape
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
-
-    def compute_loss(params, args):
-        alpha, beta = params
-        L_prev, R_prev = args
-        
-        if step_type == MirrorDescentStepType.L_STEP:
-            L = alternating_mirror_descent_compute_L(C, rho, L_prev, R_prev, alpha, beta)
-            R = R_prev
-        else:
-            R = alternating_mirror_descent_compute_R(C, rho, L_prev, R_prev, alpha, beta)
-            L = L_prev
-
-        primal_cost = jnp.sum((C @ R.T) * L) + rho * kullback_leibler_divergence(L, L_prev)
-        lagrangian_penalty_1 = alpha.T @ (L @ R @ ones_m - g1.reshape(-1, 1))
-        lagrangian_penalty_2 = beta.T @ (R.T @ L.T @ ones_n - g2.reshape(-1, 1))
-        loss = (primal_cost - (lagrangian_penalty_1 + lagrangian_penalty_2)[0,0])
-
-        return -loss
     
-    value_and_grad_fn = jax.value_and_grad(compute_loss)
-
-    def step(params, opt_state, args):
-        loss, grads = value_and_grad_fn(params, args)
-        updates, opt_state = optimizer.update(
-            grads, opt_state, params, 
-            value=loss, grad=grads, 
-            value_fn=compute_loss,
-            args=args
-        )
-        params = optax.apply_updates(params, updates)
-        return params, opt_state, grads, loss
-    
-    step = jax.jit(step)
-
-    # setup optimizer
-    linesearch = optax.scale_by_backtracking_linesearch(max_backtracking_steps=15)
-    optimizer = optax.chain(optax.lbfgs(), linesearch)
-
     # initialize parameters
     alpha = (1 / n) * jnp.ones(n).reshape(-1, 1)
     beta = (1 / m) * jnp.ones(m).reshape(-1, 1)
     init_params = (alpha, beta)
     params = (alpha, beta)
-    opt_state = optimizer.init(init_params)
+    opt_state = alternating_md_optimizer.init(init_params)
 
     for i in range(max_iter): 
-        params, opt_state, grads, loss = step(params, opt_state, (L, R))
+        args = (L, R, C, g1, g2, rho)
+        params, opt_state, grads, loss = alternating_mirror_descent_single_step(step_type, params, opt_state, args)
         grad_norm = jnp.linalg.norm(grads[0]) + jnp.linalg.norm(grads[1])
         logger.info(f"Iteration {i}, Loss: {loss}, Grad Norm: {grad_norm}")
-        if grad_norm < 1e-5:
+        if grad_norm < 1e-6:
             break
 
     return params
@@ -252,21 +268,24 @@ def alternating_mirror_descent_low_rank_ot(
     g1: jnp.ndarray, 
     g2: jnp.ndarray, 
     rank : int,
-    rho: float = 0.05
+    rho: float = 0.01,
+    seed: int = 0
 ):
+    """
+    Solves the low-rank optimal transport problem using alternating mirror 
+    descent with the low rank factorization P = L @ R, where L and R are
+    non-negative matrices of shape (n, rank) and (rank, m) respectively.
+    """
     n, m = C.shape
     if g1.shape != (n,) or g2.shape != (m,):
         raise ValueError("Dimension mismatch between C, g1, and g2.")
     
-    L, R = initialize_factors(C, g1, g2, rank)
-    # L, R = sinkhorn_rescaling(L, R, g1, g2)
+    L, R = initialize_factors(C, g1, g2, rank, seed=seed)
 
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
 
-    logger.info(f"Initial objective: {jnp.sum(C * (L @ R)) + rho * kullback_leibler_divergence(L, L)}")
-    print(jnp.sum(jnp.abs((L @ R) @ ones_m - g1.reshape(-1, 1))))
-    print(jnp.sum(jnp.abs((R.T @ L.T) @ ones_n - g2.reshape(-1, 1))))
+    logger.info(f"Initial objective: {jnp.sum(C * (L @ R))}")
     
     for i in range(100):
         step_type = MirrorDescentStepType.L_STEP if i % 2 == 0 else MirrorDescentStepType.R_STEP
@@ -278,11 +297,8 @@ def alternating_mirror_descent_low_rank_ot(
         else:
             L = alternating_mirror_descent_compute_L(C, rho, L, R, alpha, beta)
 
-        logger.info(f"Objective: {jnp.sum(C * (L @ R))}")
+        logger.info(f"Iteration {i} Objective: {jnp.sum(C * (L @ R))}")
         L, R = sinkhorn_rescaling(L, R, g1, g2)
-
-        print(jnp.sum(jnp.abs((L @ R) @ ones_m - g1.reshape(-1, 1))))
-        print(jnp.sum(jnp.abs((R.T @ L.T) @ ones_n - g2.reshape(-1, 1))))
     return L, R
         
 def solve_nuclear_ot(
@@ -369,9 +385,7 @@ def sinkhorn_rescaling_P(P, g1, g2, max_iter=1000, tol=1e-6):
 
 def nonnegative_rounding(P, g1, g2, k, seed=0):
     U, s, Vt = jnp.linalg.svd(P)
-    print(s[:25])
     s = s.at[k:].set(0)
-    print(s[:25])
     P_svd = U @ jnp.diag(s) @ Vt
     model = NMF(n_components=k, init='random', random_state=seed, max_iter=10000, solver='mu', beta_loss='frobenius')
     W = model.fit_transform(P)
