@@ -1,7 +1,7 @@
 
 import torch
-import util
-import objective_grad as gd
+import FRLC.util as util
+import FRLC.objective_grad as gd
 import matplotlib.pyplot as plt
 
 import torch

@@ -1,9 +1,8 @@
 
 import torch
-import util
-import objective_grad as gd
+import FRLC.util as util
+import FRLC.objective_grad as gd
 import matplotlib.pyplot as plt
-
 
 
 def FRLC_opt(C,
@@ -22,7 +21,7 @@ def FRLC_opt(C,
              semiRelaxedLeft=False, 
              semiRelaxedRight=False, 
              Wasserstein=True, 
-             printCost=True, 
+             printCost=False, 
              returnFull=False, 
              FGW=False, 
              alpha=0.0, 
