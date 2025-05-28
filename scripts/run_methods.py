@@ -9,6 +9,7 @@ import time
 import pandas as pd
 import argparse as ap
 import numpy as np
+import matplotlib.pyplot as plt
 
 from ott.geometry.geometry import Geometry
 from ott.problems.linear import linear_problem
@@ -20,6 +21,15 @@ sys.path.append("../src")
 import FRLC.FRLC as frlc
 import convex_lrot as clrot
 
+def visualize_transport_matrix(P, algorithm):
+    P_np = P if isinstance(P, np.ndarray) else np.array(P)
+        
+    plt.figure(figsize=(10, 8))
+    plt.imshow(P_np, cmap='viridis', interpolation='nearest')
+    plt.colorbar(label='Transport intensity')
+    plt.title(f'Transport Plan Matrix - {algorithm} (rank={rank})')
+    plt.show()
+
 def parse_args():
     parser = ap.ArgumentParser()
     parser.add_argument("cost_matrix", help="Cost matrix.")
@@ -28,6 +38,7 @@ def parse_args():
     parser.add_argument("-o", "--output", type=str, default="results")
     parser.add_argument("-a", "--algorithm", default="clrot", choices=["clrot", "amdlot", "frlc", "lot", "fullrankround"])
     parser.add_argument("--restarts", type=int, default=10)
+    parser.add_argument("--visualize", action="store_true", help="Visualize transport matrix.")
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -59,7 +70,7 @@ if __name__ == "__main__":
 
         start_time = time.time()
         P, objective_lb = clrot.solve_nuclear_ot(
-            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=25, tolerance=1e-4, verbose=True
+            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=250, tolerance=1e-4, verbose=True
         )
         end_time   = time.time()
         solve_time = end_time - start_time
@@ -72,12 +83,15 @@ if __name__ == "__main__":
             P_rounded = L @ R
             P_rounded = clrot.sinkhorn_rescaling_P(P_rounded, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
 
+            if args.visualize:
+                visualize_transport_matrix(P_rounded, args.algorithm)
+
             primal_cost = jnp.sum(C * P_rounded)
             l1_row_error = jnp.sum(jnp.abs(g1  - P_svd.sum(axis=0)))
             l1_col_error = jnp.sum(jnp.abs(g2  - P_svd.sum(axis=1)))
             l1_error     = jnp.sum(jnp.abs(1.0 - P_svd.sum()))
 
-            logger.info(f"CLROT objective: {objective_lb}, rounded objective: {primal_cost}")
+            logger.info(f"CLROT objective: {objective_lb}, rounded objective: {primal_cost}, svd objective: {jnp.sum(C * P_svd)}")
             res = {
                 "objective_cost": float(primal_cost),
                 "lower_bound": objective_lb,
@@ -106,6 +120,9 @@ if __name__ == "__main__":
             round_time = end_time - start_time
             P = L @ R
             P = clrot.sinkhorn_rescaling_P(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
+
+            if args.visualize:
+                visualize_transport_matrix(P, args.algorithm)   
 
             primal_cost = jnp.sum(C * P)
             l1_row_error = jnp.sum(jnp.abs(g1  - P.sum(axis=0)))
@@ -140,6 +157,9 @@ if __name__ == "__main__":
             P = P.cpu().numpy()
             P = clrot.sinkhorn_rescaling_P(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
 
+            if args.visualize:
+                visualize_transport_matrix(P, args.algorithm)   
+
             l1_row_error = np.sum(np.abs(g1  - P.sum(axis=0)))
             l1_col_error = np.sum(np.abs(g2  - P.sum(axis=1)))
             l1_error     = np.sum(np.abs(1.0 - P.sum()))
@@ -173,6 +193,9 @@ if __name__ == "__main__":
         P = ot_lr.matrix
         P = clrot.sinkhorn_rescaling_P(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
         
+        if args.visualize:
+            visualize_transport_matrix(P, args.algorithm)   
+       
         primal_cost  = jnp.sum(C * P)
         l1_row_error = jnp.sum(jnp.abs(g1  - P.sum(axis=0)))
         l1_col_error = jnp.sum(jnp.abs(g2  - P.sum(axis=1)))
@@ -207,12 +230,15 @@ if __name__ == "__main__":
         
         for i in range(args.restarts):
             start_time = time.time()
-            L, R = clrot.nonnegative_rounding(P, g1, g2, rank, seed=args.seed + i)
+            L, R, _ = clrot.nonnegative_rounding(P, g1, g2, rank, seed=args.seed + i)
             end_time   = time.time()
             round_time = end_time - start_time
             P_rounded = L @ R
             P_rounded = clrot.sinkhorn_rescaling_P(P_rounded, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
             primal_cost = jnp.sum(C * P_rounded)
+
+            if args.visualize:
+                visualize_transport_matrix(P, args.algorithm)   
 
             l1_row_error = jnp.sum(jnp.abs(g1  - P_rounded.sum(axis=0)))
             l1_col_error = jnp.sum(jnp.abs(g2  - P_rounded.sum(axis=1)))
