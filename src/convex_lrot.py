@@ -129,7 +129,7 @@ def solve_euclidean_reg_ot(
     P = jnp.maximum(-(C + alpha[:, None] + beta[None, :]), 0) / rho
     return P, alpha, beta
 
-class MirrorDescentStepType(enum.Enum):
+class ProximalDescentStep(enum.Enum):
     L_STEP = "L_STEP"
     R_STEP = "R_STEP"
 
@@ -153,7 +153,7 @@ def initialize_factors(C, g1, g2, rank, seed=0):
     R = jnp.diag(1 / jnp.sqrt(init_g)) @ init_r.T
     return L, R
 
-def alternating_mirror_descent_compute_L(C, rho, L, R, alpha, beta):
+def alternating_proximal_descent_compute_L(C, rho, L, R, alpha, beta):
     """ 
     Computes dual optimal solution L^* given dual variables alpha and beta,
     where L and R are the current iterates.
@@ -161,10 +161,10 @@ def alternating_mirror_descent_compute_L(C, rho, L, R, alpha, beta):
     n, m = C.shape
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
-    L_res = L * jnp.exp((1 / rho) * (ones_n @ beta.T + alpha @ ones_m.T - C) @ R.T)
+    L_res = jnp.maximum(L + ((1 / rho) * (ones_n @ beta.T + alpha @ ones_m.T - C) @ R.T), 0.0)
     return L_res
 
-def alternating_mirror_descent_compute_R(C, rho, L, R, alpha, beta):
+def alternating_proximal_descent_compute_R(C, rho, L, R, alpha, beta):
     """ 
     Computes dual optimal solution R^* given dual variables alpha and beta,
     where L and R are the current iterates.
@@ -172,10 +172,10 @@ def alternating_mirror_descent_compute_R(C, rho, L, R, alpha, beta):
     n, m = C.shape
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
-    R_res = R * jnp.exp((1 / rho) * L.T @ (alpha @ ones_m.T + ones_n @ beta.T - C))
+    R_res = jnp.maximum(R + ((1 / rho) * L.T @ (alpha @ ones_m.T + ones_n @ beta.T - C)), 0.0)
     return R_res
 
-def alternating_mirror_descent_compute_compute_loss(step_type, params, args):
+def alternating_proximal_descent_compute_loss(step_type, params, args):
     """
     Computes the dual loss for a given set of dual variables (alpha, beta) where
     the current iterates are L and R.
@@ -186,34 +186,32 @@ def alternating_mirror_descent_compute_compute_loss(step_type, params, args):
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
     
-    if step_type == MirrorDescentStepType.L_STEP:
-        L = alternating_mirror_descent_compute_L(C, rho, L_prev, R_prev, alpha, beta)
+    if step_type == ProximalDescentStep.L_STEP:
+        L = alternating_proximal_descent_compute_L(C, rho, L_prev, R_prev, alpha, beta)
         R = R_prev
-        kl_term =  jnp.sum(L * (((1 / rho) * (ones_n @ beta.T + alpha @ ones_m.T - C) @ R_prev.T)))
-        kl_term += jnp.sum(L_prev - L)
+        penalty_term = (rho / 2) * jnp.sum((L - L_prev) * (L - L_prev))
     else:
-        R = alternating_mirror_descent_compute_R(C, rho, L_prev, R_prev, alpha, beta)
+        R = alternating_proximal_descent_compute_R(C, rho, L_prev, R_prev, alpha, beta)
         L = L_prev
-        kl_term =  jnp.sum(R * ((1 / rho) * L.T @ (alpha @ ones_m.T + ones_n @ beta.T - C)))
-        kl_term += jnp.sum(R_prev - R)
+        penalty_term = (rho / 2) * jnp.sum((R - R_prev) * (R - R_prev))
 
-    primal_cost = jnp.sum((C @ R.T) * L) + rho * kl_term
+    primal_cost = jnp.sum((C @ R.T) * L) + penalty_term
     lagrangian_penalty_1 = alpha.T @ (L @ R @ ones_m - g1.reshape(-1, 1))
     lagrangian_penalty_2 = beta.T @ (R.T @ L.T @ ones_n - g2.reshape(-1, 1))
     loss = (primal_cost - (lagrangian_penalty_1 + lagrangian_penalty_2)[0,0])
     return -loss
 
-alternating_md_compute_compute_loss_grad = jax.value_and_grad(
-    alternating_mirror_descent_compute_compute_loss,
+alternating_pd_compute_grad = jax.value_and_grad(
+    alternating_proximal_descent_compute_loss,
     argnums=1
 )
 
-alternating_md_linesearch = optax.scale_by_backtracking_linesearch(max_backtracking_steps=15)
+alternating_md_linesearch = optax.scale_by_backtracking_linesearch(max_backtracking_steps=20)
 alternating_md_optimizer  = optax.chain(optax.lbfgs(), alternating_md_linesearch)
 
-def alternating_mirror_descent_single_step(step_type, params, opt_state, args):
-    value_fn = lambda p: alternating_mirror_descent_compute_compute_loss(step_type, p, args)
-    loss, grads = alternating_md_compute_compute_loss_grad(step_type, params, args)
+def alternating_proximal_descent_single_step(step_type, params, opt_state, args):
+    value_fn = lambda p: alternating_proximal_descent_compute_loss(step_type, p, args)
+    loss, grads = alternating_pd_compute_grad(step_type, params, args)
     updates, opt_state = alternating_md_optimizer.update(
         grads, opt_state, params, 
         value=loss, grad=grads, 
@@ -223,17 +221,17 @@ def alternating_mirror_descent_single_step(step_type, params, opt_state, args):
     params = optax.apply_updates(params, updates)
     return params, opt_state, grads, loss
 
-alternating_mirror_descent_single_step = jax.jit(alternating_mirror_descent_single_step, static_argnums=[0])
+alternating_proximal_descent_single_step = jax.jit(alternating_proximal_descent_single_step, static_argnums=[0])
 
-def alternating_mirror_descent_step(
+def alternating_proximal_descent_step(
     C: jnp.ndarray, 
     g1: jnp.ndarray,
     g2: jnp.ndarray,
     rho: float, 
     L: jnp.ndarray, 
     R: jnp.ndarray, 
-    step_type: MirrorDescentStepType,
-    max_iter: int = 50,
+    step_type: ProximalDescentStep,
+    max_iter: int = 150,
 ):
     """
     Solves the alternating mirror descent step for the L factor (resp.
@@ -255,10 +253,10 @@ def alternating_mirror_descent_step(
 
     for i in range(max_iter): 
         args = (L, R, C, g1, g2, rho)
-        params, opt_state, grads, loss = alternating_mirror_descent_single_step(step_type, params, opt_state, args)
+        params, opt_state, grads, loss = alternating_proximal_descent_single_step(step_type, params, opt_state, args)
         grad_norm = jnp.linalg.norm(grads[0]) + jnp.linalg.norm(grads[1])
-        # logger.info(f"Iteration {i}, Loss: {loss}, Grad Norm: {grad_norm}")
-        if grad_norm < 1e-6:
+        logger.info(f"Iteration {i}, Loss: {loss}, Grad Norm: {grad_norm}")
+        if grad_norm < 1e-5:
             break
 
     return params
@@ -271,7 +269,8 @@ def alternating_mirror_descent_low_rank_ot(
     rho: float = 0.001,
     seed: int = 0,
     L_init: jnp.ndarray = None,
-    R_init: jnp.ndarray = None
+    R_init: jnp.ndarray = None,
+    max_iter: int = 25,
 ):
     """
     Solves the low-rank optimal transport problem using alternating mirror 
@@ -292,16 +291,16 @@ def alternating_mirror_descent_low_rank_ot(
 
     logger.info(f"Initial objective: {jnp.sum(C * (L @ R))}")
     
-    for i in range(100):
-        step_type = MirrorDescentStepType.L_STEP if i % 2 == 0 else MirrorDescentStepType.R_STEP
+    for i in range(max_iter):
+        step_type = ProximalDescentStep.L_STEP if i % 2 == 0 else ProximalDescentStep.R_STEP
 
-        alpha, beta = alternating_mirror_descent_step(C, g1, g2, rho, L, R, step_type)
+        alpha, beta = alternating_proximal_descent_step(C, g1, g2, rho, L, R, step_type)
 
-        if step_type == MirrorDescentStepType.R_STEP:
-            R = alternating_mirror_descent_compute_R(C, rho, L, R, alpha, beta)
+        if step_type == ProximalDescentStep.R_STEP:
+            R = alternating_proximal_descent_compute_R(C, rho, L, R, alpha, beta)
         else:
-            L = alternating_mirror_descent_compute_L(C, rho, L, R, alpha, beta)
-
+            L = alternating_proximal_descent_compute_L(C, rho, L, R, alpha, beta)
+        
         L, R = sinkhorn_rescaling(L, R, g1, g2)
         logger.info(f"Iteration {i} Objective: {jnp.sum(C * (L @ R))}")
     return L, R

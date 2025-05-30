@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
         start_time = time.time()
         P, objective_lb = clrot.solve_nuclear_ot(
-            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=200, tolerance=1e-4, verbose=True
+            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=100, tolerance=1e-4, verbose=True
         )
         end_time   = time.time()
         solve_time = end_time - start_time
@@ -92,7 +92,7 @@ if __name__ == "__main__":
                 visualize_transport_matrix(P_rounded, "CLROT Rounded", jnp.sum(C * P_rounded), rank, show=False)
 
             L, R = clrot.alternating_mirror_descent_low_rank_ot(
-                C, jnp.array(g1), jnp.array(g2), rank, rho=0.01, L_init=L, R_init=R
+                C, jnp.array(g1), jnp.array(g2), rank, rho=1.0, L_init=L, R_init=R
             )
 
             P_rounded = L @ R
@@ -127,7 +127,7 @@ if __name__ == "__main__":
         for i in range(args.restarts):
             start_time = time.time()
             L, R = clrot.alternating_mirror_descent_low_rank_ot(
-                C, jnp.array(g1), jnp.array(g2), args.rank, rho=0.01, seed=args.seed + i,
+                C, jnp.array(g1), jnp.array(g2), args.rank, rho=1.0, seed=args.seed + i, max_iter=100
             ) 
 
             end_time   = time.time()
@@ -203,7 +203,7 @@ if __name__ == "__main__":
 
         ot_prob = linear_problem.LinearProblem(geom, g1, g2)
         start_time = time.time()
-        solver = sinkhorn_lr.LRSinkhorn(rank=rank, initializer=Rank2Initializer(rank))
+        solver = sinkhorn_lr.LRSinkhorn(rank=rank, initializer=RandomInitializer(rank))
         end_time = time.time()
         solve_time = end_time - start_time
         ot_lr = solver(ot_prob)
