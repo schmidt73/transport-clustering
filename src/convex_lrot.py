@@ -257,7 +257,7 @@ def alternating_mirror_descent_step(
         args = (L, R, C, g1, g2, rho)
         params, opt_state, grads, loss = alternating_mirror_descent_single_step(step_type, params, opt_state, args)
         grad_norm = jnp.linalg.norm(grads[0]) + jnp.linalg.norm(grads[1])
-        logger.info(f"Iteration {i}, Loss: {loss}, Grad Norm: {grad_norm}")
+        # logger.info(f"Iteration {i}, Loss: {loss}, Grad Norm: {grad_norm}")
         if grad_norm < 1e-6:
             break
 
@@ -268,8 +268,10 @@ def alternating_mirror_descent_low_rank_ot(
     g1: jnp.ndarray, 
     g2: jnp.ndarray, 
     rank : int,
-    rho: float = 0.01,
-    seed: int = 0
+    rho: float = 0.001,
+    seed: int = 0,
+    L_init: jnp.ndarray = None,
+    R_init: jnp.ndarray = None
 ):
     """
     Solves the low-rank optimal transport problem using alternating mirror 
@@ -280,7 +282,10 @@ def alternating_mirror_descent_low_rank_ot(
     if g1.shape != (n,) or g2.shape != (m,):
         raise ValueError("Dimension mismatch between C, g1, and g2.")
     
-    L, R = initialize_factors(C, g1, g2, rank, seed=seed)
+    if L_init is not None and R_init is not None:
+        L, R = L_init, R_init
+    else:
+        L, R = initialize_factors(C, g1, g2, rank, seed=seed)
 
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
@@ -297,8 +302,8 @@ def alternating_mirror_descent_low_rank_ot(
         else:
             L = alternating_mirror_descent_compute_L(C, rho, L, R, alpha, beta)
 
-        logger.info(f"Iteration {i} Objective: {jnp.sum(C * (L @ R))}")
         L, R = sinkhorn_rescaling(L, R, g1, g2)
+        logger.info(f"Iteration {i} Objective: {jnp.sum(C * (L @ R))}")
     return L, R
         
 def solve_nuclear_ot(

@@ -11,6 +11,7 @@ import argparse as ap
 import numpy as np
 import matplotlib.pyplot as plt
 
+from ott.initializers.linear.initializers_lr import RandomInitializer, KMeansInitializer, Rank2Initializer
 from ott.geometry.geometry import Geometry
 from ott.problems.linear import linear_problem
 from ott.solvers.linear import sinkhorn, sinkhorn_lr
@@ -21,14 +22,16 @@ sys.path.append("../src")
 import FRLC.FRLC as frlc
 import convex_lrot as clrot
 
-def visualize_transport_matrix(P, algorithm):
+def visualize_transport_matrix(P, algorithm, primal_cost, rank, show=True):
     P_np = P if isinstance(P, np.ndarray) else np.array(P)
         
     plt.figure(figsize=(10, 8))
     plt.imshow(P_np, cmap='viridis', interpolation='nearest')
-    plt.colorbar(label='Transport intensity')
-    plt.title(f'Transport Plan Matrix - {algorithm} (rank={rank})')
-    plt.show()
+    plt.colorbar(label='Transport Probability')
+    plt.title(f'Inferred Transport Plan: {algorithm.upper()} (rank={rank})')
+    plt.xlabel(f'$\\langle C, P\\rangle_F = {primal_cost:.3f}$', fontsize=14)
+    if show:
+        plt.show()
 
 def parse_args():
     parser = ap.ArgumentParser()
@@ -54,7 +57,6 @@ if __name__ == "__main__":
 
     C = np.loadtxt(args.cost_matrix)
     C = C / C.max() # normalize cost matrix
-
     batch_size1 = C.shape[0]
     batch_size2 = C.shape[1]
 
@@ -70,10 +72,13 @@ if __name__ == "__main__":
 
         start_time = time.time()
         P, objective_lb = clrot.solve_nuclear_ot(
-            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=250, tolerance=1e-4, verbose=True
+            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=200, tolerance=1e-4, verbose=True
         )
         end_time   = time.time()
         solve_time = end_time - start_time
+        
+        if args.visualize:
+            visualize_transport_matrix(P, "CLROT Raw", jnp.sum(C * P), rank, show=False)
 
         for i in range(args.restarts):
             start_time = time.time()
@@ -84,9 +89,18 @@ if __name__ == "__main__":
             P_rounded = clrot.sinkhorn_rescaling_P(P_rounded, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
 
             if args.visualize:
-                visualize_transport_matrix(P_rounded, args.algorithm)
+                visualize_transport_matrix(P_rounded, "CLROT Rounded", jnp.sum(C * P_rounded), rank, show=False)
 
+            L, R = clrot.alternating_mirror_descent_low_rank_ot(
+                C, jnp.array(g1), jnp.array(g2), rank, rho=0.01, L_init=L, R_init=R
+            )
+
+            P_rounded = L @ R
             primal_cost = jnp.sum(C * P_rounded)
+
+            if args.visualize:
+                visualize_transport_matrix(P_rounded, "CLROT + AMDLOT", primal_cost, rank)
+
             l1_row_error = jnp.sum(jnp.abs(g1  - P_svd.sum(axis=0)))
             l1_col_error = jnp.sum(jnp.abs(g2  - P_svd.sum(axis=1)))
             l1_error     = jnp.sum(jnp.abs(1.0 - P_svd.sum()))
@@ -113,18 +127,21 @@ if __name__ == "__main__":
         for i in range(args.restarts):
             start_time = time.time()
             L, R = clrot.alternating_mirror_descent_low_rank_ot(
-                C, jnp.array(g1), jnp.array(g2), rank, rho=0.01, seed=args.seed + i,
-            )
+                C, jnp.array(g1), jnp.array(g2), args.rank, rho=0.01, seed=args.seed + i,
+            ) 
+
             end_time   = time.time()
             solve_time = end_time - start_time
             round_time = end_time - start_time
+
             P = L @ R
             P = clrot.sinkhorn_rescaling_P(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
 
-            if args.visualize:
-                visualize_transport_matrix(P, args.algorithm)   
-
             primal_cost = jnp.sum(C * P)
+
+            if args.visualize:
+                visualize_transport_matrix(P, args.algorithm, primal_cost, rank)   
+
             l1_row_error = jnp.sum(jnp.abs(g1  - P.sum(axis=0)))
             l1_col_error = jnp.sum(jnp.abs(g2  - P.sum(axis=1)))
             l1_error     = jnp.sum(jnp.abs(1.0 - P.sum()))
@@ -157,14 +174,15 @@ if __name__ == "__main__":
             P = P.cpu().numpy()
             P = clrot.sinkhorn_rescaling_P(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
 
+            primal_cost = np.sum(C.cpu().numpy() * P)
+
             if args.visualize:
-                visualize_transport_matrix(P, args.algorithm)   
+                visualize_transport_matrix(P, args.algorithm, primal_cost, rank)   
 
             l1_row_error = np.sum(np.abs(g1  - P.sum(axis=0)))
             l1_col_error = np.sum(np.abs(g2  - P.sum(axis=1)))
             l1_error     = np.sum(np.abs(1.0 - P.sum()))
 
-            primal_cost = np.sum(C.cpu().numpy() * P)
             logger.info(f"FRLC objective: {primal_cost}")
             res = {
                 "objective_cost": float(primal_cost),
@@ -185,7 +203,7 @@ if __name__ == "__main__":
 
         ot_prob = linear_problem.LinearProblem(geom, g1, g2)
         start_time = time.time()
-        solver = sinkhorn_lr.LRSinkhorn(rank=rank)
+        solver = sinkhorn_lr.LRSinkhorn(rank=rank, initializer=Rank2Initializer(rank))
         end_time = time.time()
         solve_time = end_time - start_time
         ot_lr = solver(ot_prob)
@@ -193,10 +211,11 @@ if __name__ == "__main__":
         P = ot_lr.matrix
         P = clrot.sinkhorn_rescaling_P(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
         
-        if args.visualize:
-            visualize_transport_matrix(P, args.algorithm)   
-       
         primal_cost  = jnp.sum(C * P)
+
+        if args.visualize:
+            visualize_transport_matrix(P, args.algorithm, primal_cost, rank)   
+       
         l1_row_error = jnp.sum(jnp.abs(g1  - P.sum(axis=0)))
         l1_col_error = jnp.sum(jnp.abs(g2  - P.sum(axis=1)))
         l1_error     = jnp.sum(jnp.abs(1.0 - P.sum()))
@@ -238,7 +257,7 @@ if __name__ == "__main__":
             primal_cost = jnp.sum(C * P_rounded)
 
             if args.visualize:
-                visualize_transport_matrix(P, args.algorithm)   
+                visualize_transport_matrix(P, args.algorithm, primal_cost)   
 
             l1_row_error = jnp.sum(jnp.abs(g1  - P_rounded.sum(axis=0)))
             l1_col_error = jnp.sum(jnp.abs(g2  - P_rounded.sum(axis=1)))
