@@ -7,133 +7,75 @@ import jax.numpy as jnp
 import cvxpy as cp
 import numpy as np
 
-from ott.geometry import geometry, pointcloud
-from ott.problems.linear import linear_problem
-from ott.solvers.linear import sinkhorn
 from loguru import logger
 from sklearn.decomposition import NMF
 import optax
 import enum
 
-def solve_linear_ot_cvxpy(
-    C: np.ndarray, 
-    g1: np.ndarray, 
-    g2: np.ndarray, 
-    solver: str = "MOSEK"
-):
-    m, n = C.shape
-    if g1.shape != (m,) or g2.shape != (n,):
-        raise ValueError("Dimension mismatch between C, g1, and g2.")
-
-    P = cp.Variable((m, n), nonneg=True)
-
-    ones_n = np.ones(n)
-    ones_m = np.ones(m)
-
-    constraints = [
-        P @ ones_n == g1,
-        P.T @ ones_m == g2
-    ]
-
-    objective = cp.Minimize(cp.sum(cp.multiply(C, P)))
-    prob = cp.Problem(objective, constraints)
-    prob.solve(solver=solver, verbose=True)
-
-    if prob.status not in ("optimal", "optimal_inaccurate"):
-        raise RuntimeError(f"Solver did not converge: status = {prob.status}")
-
-    return P.value, prob.value
-
-def solve_euclidean_reg_ot_cvxpy(
-    C: np.ndarray, 
-    g1: np.ndarray, 
-    g2: np.ndarray, 
-    rho: float = 0.1,
-    solver: str = "MOSEK"
-):
-    m, n = C.shape
-    if g1.shape != (m,) or g2.shape != (n,):
-        raise ValueError("Dimension mismatch between C, g1, and g2.")
-
-    P = cp.Variable((m, n), nonneg=True)
-
-    ones_n = np.ones(n)
-    ones_m = np.ones(m)
-
-    constraints = [
-        P @ ones_n == g1,
-        P.T @ ones_m == g2
-    ]
-
-    objective = cp.Minimize(cp.sum(cp.multiply(C, P)) + (rho / 2.0) * cp.norm(P, "fro")**2)
-    prob = cp.Problem(objective, constraints)
-    prob.solve(solver=solver, verbose=False)
-
-    if prob.status not in ("optimal", "optimal_inaccurate"):
-        raise RuntimeError(f"Solver did not converge: status = {prob.status}")
-
-    return P.value, prob.value
-
-def simplex_projection(X: jnp.ndarray, t: jnp.ndarray):
-    """
-    Given a vector (x_1, \\ldots, x_n) and a scalar t, finds \\theta
-    such that \sum_{i=1}^n[x_i - \\theta]_+ = t. 
-    
-    Rather than taking in a single vector, we take in a vector of 
-    vectors X : m-by-n and an n-dimensional vector of scalars t,
-    for which we solve the problem independently for each row of X.
-
-    Based upon the algorithm of Duchi et al. 2008, "Efficient 
-    Projections onto the \\ell_1 Ball for Learning in High 
-    Dimensions".
-    """
-    X = jnp.sort(X, axis=1)[:, ::-1]
-    X_cum = jnp.cumsum(X, axis=1)
-    rhos  = X - (1.0 / jnp.arange(1, X_cum.shape[1] + 1)) * (X_cum.T - t).T 
-    rho   = jnp.argmax((rhos > 0) * jnp.arange(0, X_cum.shape[1]), axis=1)
-    theta = (1.0 / (rho + 1)) * (X_cum[jnp.arange(0, X_cum.shape[0]), rho] - t)
-    return theta
-
-@jax.jit
-def nuclear_projection(A):
-    """Projection onto nuclear norm ball."""
-    U, s, V = jnp.linalg.svd(A, full_matrices=False)
-    s = jax.lax.cond(
-        jnp.sum(s) <= 1,
-        lambda x: x,
-        lambda x: jnp.maximum(x - simplex_projection(x[None,:], jnp.array([1.0]))[0], 0),
-        s
-    )
-    return U.dot(jnp.diag(s).dot(V))
-
-@jax.jit
-def solve_euclidean_reg_ot(
-    C: jnp.ndarray, 
-    g1: jnp.ndarray, 
-    g2: jnp.ndarray, 
-    P1_alpha : jnp.ndarray,
-    P2_beta : jnp.ndarray,
-    rho: float = 100,
-    iterations: int = 20
-):
-    alpha = P1_alpha
-    beta  = P2_beta
-
-    def body(_, state):
-        alpha, beta = state
-        alpha = simplex_projection(-(C + beta),  rho * g1)
-        beta  = simplex_projection(-(C.T + alpha), rho * g2)
-        return (alpha, beta)
-
-    alpha, beta = jax.lax.fori_loop(0, iterations, body, (alpha, beta))
-    P = jnp.maximum(-(C + alpha[:, None] + beta[None, :]), 0) / rho
-    return P, alpha, beta
-
 class ProximalDescentStep(enum.Enum):
     L_STEP = "L_STEP"
     R_STEP = "R_STEP"
 
-def initialize_factors(C, g1, g2, rank, seed=0):
+@jax.jit
+def row_constrained_projection(
+    X: jnp.ndarray, 
+    w: jnp.ndarray, 
+    min_iter: int=5, 
+    max_iter: int=100, 
+    convergence_threshold: float=1e-5, 
+    tol: float=1e-9
+):
+    """
+    Solves the problem:
+        min_{Y} 1/2||X - Y||_F^2
+        s.t. \sum_{j=1}^m w_i||y_i||_2 \leq 1
+    where X is a matrix of shape (m, n), w is a vector of shape (m,),
+    and y_i is the i-th row of Y.
+    """
+
+    X_norms = jnp.linalg.norm(X, axis=1)
+
+    def compute_loss(gamma):
+        l1 = w * gamma * X_norms - 0.5 * (w * gamma)**2
+        l2 = 0.5 * X_norms**2
+        return -(jnp.sum(jnp.where(w * gamma <= X_norms, l1, l2)) - gamma)
+    
+    value_and_grad_fn = jax.value_and_grad(compute_loss)
+    
+    gamma = jnp.array(1.0)
+    optimizer = optax.lbfgs()
+    opt_state = optimizer.init(gamma)
+    
+    def cond_fn(carry):
+        i, gamma, opt_state, loss_value, grads, converged = carry
+        return (i < max_iter) & (~converged)
+    
+    def body_fn(carry):
+        i, gamma, opt_state, loss_value, grads, converged = carry
+        loss_value, grads = value_and_grad_fn(gamma)
+        updates, new_opt_state = optimizer.update(grads, opt_state, gamma, value=loss_value, grad=grads, value_fn=compute_loss)
+        new_gamma = optax.apply_updates(gamma, updates)
+        new_gamma = jnp.maximum(new_gamma, tol) # ensure positivity of gamma
+        has_converged = (i > min_iter) & (jnp.abs(grads) < convergence_threshold)
+        return i + 1, new_gamma, new_opt_state, loss_value, grads, has_converged
+    
+    init_loss, init_grads = value_and_grad_fn(gamma)
+    init_state = (0, gamma, opt_state, init_loss, init_grads, jnp.array(False))
+    
+    final_state = jax.lax.while_loop(cond_fn, body_fn, init_state)
+    
+    _, gamma, _, _, _, _ = final_state
+
+    optimal_gamma = gamma
+    Y = jnp.where(
+        (w[:, None] * optimal_gamma) < X_norms[:, None],
+        X * (1 - (w[:, None] * optimal_gamma) / X_norms[:, None]),
+        jnp.zeros_like(X)
+    )
+    
+    return Y
+
+def initialize_factors(C: jnp.ndarray, g1: jnp.ndarray, g2: jnp.ndarray, rank: int, seed: int = 0):
     """
     Uses a Scetbon-style random initialization for the factors L and R.
     """
@@ -153,6 +95,7 @@ def initialize_factors(C, g1, g2, rank, seed=0):
     R = jnp.diag(1 / jnp.sqrt(init_g)) @ init_r.T
     return L, R
 
+@jax.jit
 def alternating_proximal_descent_compute_L(C, rho, L, R, alpha, beta):
     """ 
     Computes dual optimal solution L^* given dual variables alpha and beta,
@@ -164,6 +107,7 @@ def alternating_proximal_descent_compute_L(C, rho, L, R, alpha, beta):
     L_res = (1 / rho) * jnp.maximum((ones_n @ beta.T + alpha @ ones_m.T) @ R.T - C, 0.0)
     return L_res
 
+@jax.jit
 def alternating_proximal_descent_compute_R(C, rho, L, R, alpha, beta):
     """ 
     Computes dual optimal solution R^* given dual variables alpha and beta,
@@ -205,13 +149,13 @@ alternating_pd_compute_grad = jax.value_and_grad(
     argnums=1
 )
 
-alternating_md_linesearch = optax.scale_by_backtracking_linesearch(max_backtracking_steps=20)
-alternating_md_optimizer  = optax.chain(optax.lbfgs(), alternating_md_linesearch)
+alternating_pd_linesearch = optax.scale_by_backtracking_linesearch(max_backtracking_steps=20)
+alternating_pd_optimizer  = optax.chain(optax.lbfgs(), alternating_pd_linesearch)
 
 def alternating_proximal_descent_single_step(step_type, params, opt_state, args):
     value_fn = lambda p: alternating_proximal_descent_compute_loss(step_type, p, args)
     loss, grads = alternating_pd_compute_grad(step_type, params, args)
-    updates, opt_state = alternating_md_optimizer.update(
+    updates, opt_state = alternating_pd_optimizer.update(
         grads, opt_state, params, 
         value=loss, grad=grads, 
         value_fn=value_fn,
@@ -219,8 +163,6 @@ def alternating_proximal_descent_single_step(step_type, params, opt_state, args)
     )
     params = optax.apply_updates(params, updates)
     return params, opt_state, grads, loss
-
-alternating_proximal_descent_single_step = jax.jit(alternating_proximal_descent_single_step, static_argnums=[0])
 
 def alternating_proximal_descent_step(
     C: jnp.ndarray, 
@@ -230,12 +172,13 @@ def alternating_proximal_descent_step(
     L_fixed: jnp.ndarray, 
     R_fixed: jnp.ndarray, 
     step_type: ProximalDescentStep,
-    max_iter: int = 1000,
+    max_iter: int = 100,
+    convergence_threshold: float = 1e-3
 ):
     """
-    Solves the alternating mirror descent step:
+    Solves one of the alternating proximal descent steps:
             min_{L : LR \in \Pi_{a,b}} <C, L>_F + (rho / 2) ||L||_F^2
-        or  min_{R : LR \in \Pi_{a,b}} <C, R>_F + (rho / 2) ||R||_F^2
+        or  min_{R : LR \in \Pi_{a,b}} <C, R>_F + (rho / 2) ||R||_F^2,
     by solving the unconstrained dual problem for the dual variables 
     alpha and beta.
     """
@@ -243,29 +186,108 @@ def alternating_proximal_descent_step(
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
     
-    # initialize parameters
     alpha = (1 / n) * jnp.ones(n).reshape(-1, 1)
     beta = (1 / m) * jnp.ones(m).reshape(-1, 1)
     init_params = (alpha, beta)
     params = (alpha, beta)
-    opt_state = alternating_md_optimizer.init(init_params)
+    opt_state = alternating_pd_optimizer.init(init_params)
 
     args = (L_fixed, R_fixed, C, g1, g2, rho)
-    for i in range(max_iter): 
+    def cond_fn(carry):
+        i, params, opt_state, grads, loss, converged = carry
+        return (i < max_iter) & (~converged)
+    
+    def body_fn(carry):
+        i, params, opt_state, grads, loss, _ = carry
         params, opt_state, grads, loss = alternating_proximal_descent_single_step(step_type, params, opt_state, args)
         grad_norm = jnp.linalg.norm(grads[0]) + jnp.linalg.norm(grads[1])
-        logger.info(f"Iteration {i}, Loss: {loss}, Grad Norm: {grad_norm}")
-        if grad_norm < 1e-4:
+        has_converged = (jnp.max(jnp.abs(grads[0])) < convergence_threshold) & (jnp.max(jnp.abs(grads[1])) < convergence_threshold)
+        return i + 1, params, opt_state, grads, loss, has_converged
+    
+    init_loss = alternating_proximal_descent_compute_loss(step_type, params, args)
+    init_grads = (jnp.zeros_like(params[0]), jnp.zeros_like(params[1]))
+    init_state = (0, params, opt_state, init_grads, init_loss, jnp.array(False))
+    
+    final_state = jax.lax.while_loop(cond_fn, body_fn, init_state)
+    
+    _, params, _, _, _, _ = final_state
+    return params
+
+alternating_proximal_descent_step = jax.jit(alternating_proximal_descent_step, static_argnums=[6, 7, 8])
+
+def alternating_relaxed_proximal_descent_L_admm(
+    C: jnp.ndarray,
+    R: jnp.ndarray,
+    g1: jnp.ndarray,
+    g2: jnp.ndarray,
+    rho: float,
+    gamma: float = 1.0,
+    nu: float = 10.0,  
+    min_iter: int = 10,
+    max_iter: int = 25,
+    convergence_threshold: float = 1e-4
+):
+    """
+    Solves the alternating proximal descent steps:
+            min_{L : LR \in \Pi_{a,b}, ||LR||_+ \leq \gamma} <C, L>_F + (rho / 2) ||L||_F^2
+    by using an ADMM approach.
+    """
+    D  = jnp.zeros_like(C)
+    L1 = jnp.zeros_like(C)
+    L2 = jnp.zeros_like(C)
+
+    for i in range(max_iter):
+        C_prime = C - nu * (L2 - D)
+        alpha, beta = alternating_proximal_descent_step(C_prime, g1, g2, rho + nu, L1, R, ProximalDescentStep.L_STEP)
+        L1 = alternating_proximal_descent_compute_L(C_prime, rho + nu, L1, R, alpha, beta) 
+        L2 = gamma * row_constrained_projection((L1 + D).T / gamma, jnp.linalg.norm(R, axis=1)).T
+        D = D + (L1 - L2)
+
+        if jnp.max(jnp.abs(L1 - L2)) < convergence_threshold and i >= min_iter:
             break
 
-    return params
+    return L1
+
+def alternating_relaxed_proximal_descent_R_admm(
+    C: jnp.ndarray,
+    L: jnp.ndarray,
+    g1: jnp.ndarray,
+    g2: jnp.ndarray,
+    rho: float,
+    gamma: float = 1.0,
+    nu: float = 10.0,  
+    min_iter: int = 10,
+    max_iter: int = 30,
+    convergence_threshold: float = 1e-4
+):
+    """
+    Solves the alternating proximal descent steps:
+            min_{R : LR ]\in \\Pi_{a,b}, ||LR||_+ \\leq \\gamma} <R, L>_F + (rho / 2) ||R||_F^2
+    by using an ADMM approach.
+    """
+    D  = jnp.zeros_like(C)
+    R1 = jnp.zeros_like(C)
+    R2 = jnp.zeros_like(C)
+
+    for i in range(max_iter):
+        C_prime = C - nu * (R2 - D)
+        alpha, beta = alternating_proximal_descent_step(C_prime, g1, g2, rho + nu, L, R1, ProximalDescentStep.R_STEP)
+        R1 = alternating_proximal_descent_compute_R(C_prime, rho + nu, L, R1, alpha, beta) 
+        R2 = gamma * row_constrained_projection((R1 + D) / gamma, jnp.linalg.norm(L, axis=0))
+        D = D + (R1 - R2)
+        if jnp.max(jnp.abs(R1 - R2)) < convergence_threshold and i >= min_iter:
+            break
+
+    return R1
 
 def alternating_mirror_descent_low_rank_ot(
     C: jnp.ndarray, 
     g1: jnp.ndarray, 
     g2: jnp.ndarray, 
-    rank : int,
-    rho: float = 0.001,
+    rank_1 : int,
+    rank_2 : int = None,
+    rho: float = 1.0,
+    gamma: float = 1.0,
     seed: int = 0,
     L_init: jnp.ndarray = None,
     R_init: jnp.ndarray = None,
@@ -284,7 +306,7 @@ def alternating_mirror_descent_low_rank_ot(
     if L_init is not None and R_init is not None:
         L, R = L_init, R_init
     else:
-        L, R = initialize_factors(C, g1, g2, rank, seed=seed)
+        L, R = initialize_factors(C, g1, g2, rank_1, seed=seed)
 
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
@@ -296,60 +318,28 @@ def alternating_mirror_descent_low_rank_ot(
 
         if step_type == ProximalDescentStep.R_STEP:
             C_prime = L.T @ C - rho * R
-            alpha, beta = alternating_proximal_descent_step(C_prime, g1, g2, rho, L, R, step_type)
-            R = alternating_proximal_descent_compute_R(C_prime, rho, L, R, alpha, beta)
+
+            if rank_2 is not None:
+                R = alternating_relaxed_proximal_descent_R_admm(C_prime, L, g1, g2, rho, nu=1.0, gamma=gamma * rank_2)
+            else:
+                alpha, beta = alternating_proximal_descent_step(C_prime, g1, g2, rho, L, R, step_type)
+                R = alternating_proximal_descent_compute_R(C_prime, rho, L, R, alpha, beta)
         else:
             C_prime = C @ R.T - rho * L
-            alpha, beta = alternating_proximal_descent_step(C_prime, g1, g2, rho, L, R, step_type)
-            L = alternating_proximal_descent_compute_L(C_prime, rho, L, R, alpha, beta)
+
+            if rank_2 is not None:
+                L = alternating_relaxed_proximal_descent_L_admm(C_prime, R, g1, g2, rho, nu=1.0, gamma=gamma * rank_2)
+            else:
+                alpha, beta = alternating_proximal_descent_step(C_prime, g1, g2, rho, L, R, step_type)
+                L = alternating_proximal_descent_compute_L(C_prime, rho, L, R, alpha, beta)
         
         L, R = sinkhorn_rescaling(L, R, g1, g2)
         logger.info(f"Iteration {i} Objective: {jnp.sum(C * (L @ R))}")
+
     return L, R
-        
-def solve_nuclear_ot(
-    C: jnp.ndarray, 
-    g1: jnp.ndarray, 
-    g2: jnp.ndarray, 
-    k: int, gamma: float, 
-    max_iter: int = 100, 
-    tolerance: float = 1e-4, 
-    rho: float = 100,
-    verbose: bool = False
-):
-    P1_alpha = jnp.zeros_like(g1)
-    P1_beta  = jnp.zeros_like(g2)
-    P2       = jnp.zeros_like(C)
-    D        = jnp.zeros_like(C)
-
-    iteration = 0
-    while iteration < max_iter:
-        start_time_euc_ot = time.time()
-        P1, P1_alpha, P1_beta = solve_euclidean_reg_ot(C - rho * (P2 - D), g1, g2, P1_alpha, P1_beta, rho=rho)
-        P1.block_until_ready()
-        end_time_euc_ot = time.time()
-
-        start_time_nuc_proj = time.time()
-        P2 = (gamma * k) * nuclear_projection((P1 + D) / (gamma * k))
-        P2.block_until_ready()
-        end_time_nuc_proj = time.time()
-
-        R  = P1 - P2
-        D  = D + R
-
-        if verbose:
-            logger.info(f"Iteration {iteration}")
-            logger.info(f"Objective: {jnp.sum(C * P1)}")
-            logger.info(f"Residual Norm: {jnp.linalg.norm(R)}")
-            logger.info(f"Time for Euclidean OT: {end_time_euc_ot - start_time_euc_ot}")
-            logger.info(f"Time for Nuclear Projection: {end_time_nuc_proj - start_time_nuc_proj}")
-
-        iteration += 1
-
-    return P1, np.sum(C * P1)
 
 @jax.jit
-def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-8):
+def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-4):
     rescaling_rows = True
     for _ in range(max_iter):
         if rescaling_rows:
@@ -369,7 +359,7 @@ def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-8):
         #     break
     return L, R
 
-def sinkhorn_rescaling_P(P, g1, g2, max_iter=1000, tol=1e-6):
+def sinkhorn_rescaling_P(P, g1, g2, max_iter=100, tol=1e-4):
     rescaling_rows = True
     for _ in range(max_iter):
         if rescaling_rows:
@@ -398,56 +388,3 @@ def nonnegative_rounding(P, g1, g2, k, seed=0):
     H = model.components_
     L_round, R_round = sinkhorn_rescaling(W, H, g1, g2)
     return L_round, R_round, P_svd
-
-def row_constrained_projection_mosek(X : jnp.ndarray, w : jnp.ndarray):
-    """
-    Solves the problem:
-        min_{Y} 1/2||X - Y||_F^2
-        s.t. \sum_{j=1}^m w_i||y_i||_2 \leq 1
-    where X is a matrix of shape (m, n), w is a vector of shape (m,),
-    and y_i is the i-th row of Y.
-    """
-
-    m, n = X.shape
-    if w.shape != (m,):
-        raise ValueError("Dimension mismatch between X and w.")
-
-    Y = cp.Variable((m, n), nonneg=True)
-    ones_n = np.ones(n)
-
-    constraints = [
-        cp.sum(cp.multiply(cp.norm(Y, axis=1), w)) <= 1
-    ]
-
-    objective = cp.Minimize(0.5 * cp.sum_squares(X - Y))
-    prob = cp.Problem(objective, constraints)
-    prob.solve(solver="MOSEK", verbose=True)
-
-    if prob.status not in ("optimal", "optimal_inaccurate"):
-        raise RuntimeError(f"Solver did not converge: status = {prob.status}")
-
-    return Y.value
-
-def row_constrained_projection(X : jnp.ndarray, w : jnp.ndarray):
-    """
-    Solves the problem:
-        min_{Y} ||X - Y||_F^2
-        s.t. \sum_{j=1}^m w_i||y_i||_2 \leq 1
-    where X is a matrix of shape (m, n), w is a vector of shape (m,),
-    and y_i is the i-th row of Y.
-    """
-
-    X_norms = jnp.linalg.norm(X, axis=1)
-
-    def loss(gamma):
-        return jnp.sum(
-            jnp.where(
-                w * gamma <= X_norms,
-                w * gamma * X_norms - 0.5 * (w * gamma)**2,
-                0.5 * X_norms**2
-            )
-        ) - gamma
-    
-    for gamma in jnp.linspace(0, 10, 1000):
-        print(f"Gamma: {gamma}, Loss: {loss(gamma)}")
-    pass
