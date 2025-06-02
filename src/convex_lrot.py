@@ -338,7 +338,6 @@ def alternating_mirror_descent_low_rank_ot(
 
     return L, R
 
-@jax.jit
 def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-4):
     rescaling_rows = True
     for _ in range(max_iter):
@@ -353,10 +352,10 @@ def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-4):
             R = R @ rescaling_matrix
             rescaling_rows = True
 
-        # norm1 = jnp.linalg.norm(L @ R @ jnp.ones(R.shape[1]) - g1)
-        # norm2 = jnp.linalg.norm(R.T @ L.T @ jnp.ones(L.shape[0]) - g2)
-        # if norm1 < tol and norm2 < tol:
-        #     break
+        norm1 = jnp.linalg.norm(L @ R @ jnp.ones(R.shape[1]) - g1)
+        norm2 = jnp.linalg.norm(R.T @ L.T @ jnp.ones(L.shape[0]) - g2)
+        if norm1 < tol and norm2 < tol:
+            break
     return L, R
 
 def sinkhorn_rescaling_P(P, g1, g2, max_iter=100, tol=1e-4):
@@ -379,7 +378,7 @@ def sinkhorn_rescaling_P(P, g1, g2, max_iter=100, tol=1e-4):
             break
     return P
 
-def nonnegative_rounding(P, g1, g2, k, seed=0):
+def nonnegative_rounding_P(P, g1, g2, k, seed=0):
     U, s, Vt = jnp.linalg.svd(P)
     s = s.at[k:].set(0)
     P_svd = U @ jnp.diag(s) @ Vt
@@ -388,3 +387,14 @@ def nonnegative_rounding(P, g1, g2, k, seed=0):
     H = model.components_
     L_round, R_round = sinkhorn_rescaling(W, H, g1, g2)
     return L_round, R_round, P_svd
+
+def nonnegative_rounding(L, R, g1, g2, k, seed=0):
+    """
+    Performs non-negative rounding on the low-rank factors L and R.
+    """
+    singular_values = jnp.linalg.norm(L, axis=0) * jnp.linalg.norm(R, axis=1)
+    sorted_indices = jnp.argsort(singular_values)[::-1]
+    top_k_indices = sorted_indices[:k]
+    L_k = L[:, top_k_indices]
+    R_k = R[top_k_indices, :]
+    return L_k, R_k

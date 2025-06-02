@@ -9,6 +9,7 @@ import time
 import pandas as pd
 import argparse as ap
 import numpy as np
+import seaborn as sns
 import matplotlib.pyplot as plt
 
 from ott.initializers.linear.initializers_lr import RandomInitializer, KMeansInitializer, Rank2Initializer
@@ -71,28 +72,37 @@ if __name__ == "__main__":
         C = jnp.array(C)
 
         start_time = time.time()
-        P, objective_lb = clrot.solve_nuclear_ot(
-            C, jnp.array(g1), jnp.array(g2), k=rank, gamma=gamma, max_iter=100, tolerance=1e-4, verbose=True
+        L, R = clrot.alternating_mirror_descent_low_rank_ot(
+            C, jnp.array(g1), jnp.array(g2), rank_1=2 * rank, rank_2=rank, rho=1.0, max_iter=20, gamma=gamma
         )
+        P = L @ R
         end_time   = time.time()
         solve_time = end_time - start_time
         
         if args.visualize:
             visualize_transport_matrix(P, "CLROT Raw", jnp.sum(C * P), rank, show=False)
 
+            singular_values = jnp.linalg.norm(L, axis=0) * jnp.linalg.norm(R, axis=1)
+            singular_values = jnp.sort(singular_values)[::-1]
+            fig, ax = plt.subplots(figsize=(10, 6))
+            sns.scatterplot(x=range(len(singular_values)), y=singular_values, marker='o', ax=ax)
+            ax.axvline(x=rank, color='black', linestyle='--', label=f'Rank = {rank}')
+            ax.set_xlabel('Index')
+            ax.set_ylabel('Singular Value')
+            
         for i in range(args.restarts):
             start_time = time.time()
-            L, R, P_svd = clrot.nonnegative_rounding(P, g1, g2, rank, seed=args.seed + i)
+            L, R = clrot.nonnegative_rounding(L, R, g1, g2, rank, seed=args.seed + i)
+            L, R = jnp.clip(L, 1e-8), jnp.clip(R, 1e-8)  # ensure strictly positive entries
             end_time   = time.time()
             round_time = end_time - start_time
-            P_rounded = L @ R
-            P_rounded = clrot.sinkhorn_rescaling_P(P_rounded, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
+            L, R = clrot.sinkhorn_rescaling(L, R, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
 
             if args.visualize:
-                visualize_transport_matrix(P_rounded, "CLROT Rounded", jnp.sum(C * P_rounded), rank, show=False)
+                visualize_transport_matrix(L @ R, "CLROT Rounded", jnp.sum(C * (L @ R)), rank, show=False)
 
             L, R = clrot.alternating_mirror_descent_low_rank_ot(
-                C, jnp.array(g1), jnp.array(g2), rank, rho=1.0, L_init=L, R_init=R
+                C, jnp.array(g1), jnp.array(g2), rank_1=rank, rho=10.0, L_init=L, R_init=R, max_iter=25
             )
 
             P_rounded = L @ R
@@ -101,14 +111,14 @@ if __name__ == "__main__":
             if args.visualize:
                 visualize_transport_matrix(P_rounded, "CLROT + AMDLOT", primal_cost, rank)
 
-            l1_row_error = jnp.sum(jnp.abs(g1  - P_svd.sum(axis=0)))
-            l1_col_error = jnp.sum(jnp.abs(g2  - P_svd.sum(axis=1)))
-            l1_error     = jnp.sum(jnp.abs(1.0 - P_svd.sum()))
+            l1_row_error = jnp.sum(jnp.abs(g1  - (L @ R).sum(axis=0)))
+            l1_col_error = jnp.sum(jnp.abs(g2  - (L @ R).sum(axis=1)))
+            l1_error     = jnp.sum(jnp.abs(1.0 - (L @ R).sum()))
 
-            logger.info(f"CLROT objective: {objective_lb}, rounded objective: {primal_cost}, svd objective: {jnp.sum(C * P_svd)}")
+            logger.info(f"CLROT objective: {primal_cost}")
             res = {
                 "objective_cost": float(primal_cost),
-                "lower_bound": objective_lb,
+                "lower_bound": None,
                 "rank": rank,
                 "simulation_seed": args.seed,
                 "num_restart": i,
@@ -127,7 +137,7 @@ if __name__ == "__main__":
         for i in range(args.restarts):
             start_time = time.time()
             L, R = clrot.alternating_mirror_descent_low_rank_ot(
-                C, jnp.array(g1), jnp.array(g2), args.rank, rho=1.0, seed=args.seed + i, max_iter=100
+                C, jnp.array(g1), jnp.array(g2), args.rank, rho=1.0, seed=args.seed + i, max_iter=20
             ) 
 
             end_time   = time.time()
@@ -249,7 +259,7 @@ if __name__ == "__main__":
         
         for i in range(args.restarts):
             start_time = time.time()
-            L, R, _ = clrot.nonnegative_rounding(P, g1, g2, rank, seed=args.seed + i)
+            L, R, _ = clrot.nonnegative_rounding_P(P, g1, g2, rank, seed=args.seed + i)
             end_time   = time.time()
             round_time = end_time - start_time
             P_rounded = L @ R
