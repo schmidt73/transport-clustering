@@ -158,10 +158,10 @@ def alternating_proximal_descent_compute_L(C, rho, L, R, alpha, beta):
     Computes dual optimal solution L^* given dual variables alpha and beta,
     where L and R are the current iterates.
     """
-    n, m = C.shape
+    n, m = L.shape[0], R.shape[1]
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
-    L_res = jnp.maximum(L + ((1 / rho) * (ones_n @ beta.T + alpha @ ones_m.T - C) @ R.T), 0.0)
+    L_res = (1 / rho) * jnp.maximum((ones_n @ beta.T + alpha @ ones_m.T) @ R.T - C, 0.0)
     return L_res
 
 def alternating_proximal_descent_compute_R(C, rho, L, R, alpha, beta):
@@ -169,10 +169,10 @@ def alternating_proximal_descent_compute_R(C, rho, L, R, alpha, beta):
     Computes dual optimal solution R^* given dual variables alpha and beta,
     where L and R are the current iterates.
     """
-    n, m = C.shape
+    n, m = L.shape[0], R.shape[1]
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
-    R_res = jnp.maximum(R + ((1 / rho) * L.T @ (alpha @ ones_m.T + ones_n @ beta.T - C)), 0.0)
+    R_res = (1 / rho) * jnp.maximum(L.T @ (alpha @ ones_m.T + ones_n @ beta.T) - C, 0.0)
     return R_res
 
 def alternating_proximal_descent_compute_loss(step_type, params, args):
@@ -182,20 +182,19 @@ def alternating_proximal_descent_compute_loss(step_type, params, args):
     """
     alpha, beta = params
     L_prev, R_prev, C, g1, g2, rho = args
-    n, m = C.shape
+    n, m = L_prev.shape[0], R_prev.shape[1]
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
     
     if step_type == ProximalDescentStep.L_STEP:
         L = alternating_proximal_descent_compute_L(C, rho, L_prev, R_prev, alpha, beta)
         R = R_prev
-        penalty_term = (rho / 2) * jnp.sum((L - L_prev) * (L - L_prev))
+        primal_cost = jnp.sum(C * L) + (rho / 2) * jnp.sum(L * L)
     else:
         R = alternating_proximal_descent_compute_R(C, rho, L_prev, R_prev, alpha, beta)
         L = L_prev
-        penalty_term = (rho / 2) * jnp.sum((R - R_prev) * (R - R_prev))
+        primal_cost = jnp.sum(C * R) + (rho / 2) * jnp.sum(R * R)
 
-    primal_cost = jnp.sum((C @ R.T) * L) + penalty_term
     lagrangian_penalty_1 = alpha.T @ (L @ R @ ones_m - g1.reshape(-1, 1))
     lagrangian_penalty_2 = beta.T @ (R.T @ L.T @ ones_n - g2.reshape(-1, 1))
     loss = (primal_cost - (lagrangian_penalty_1 + lagrangian_penalty_2)[0,0])
@@ -228,19 +227,19 @@ def alternating_proximal_descent_step(
     g1: jnp.ndarray,
     g2: jnp.ndarray,
     rho: float, 
-    L: jnp.ndarray, 
-    R: jnp.ndarray, 
+    L_fixed: jnp.ndarray, 
+    R_fixed: jnp.ndarray, 
     step_type: ProximalDescentStep,
-    max_iter: int = 150,
+    max_iter: int = 1000,
 ):
     """
-    Solves the alternating mirror descent step for the L factor (resp.
-    R factor):
-            min_{L} <C, L @ R>_F + (rho / 2) * KL(L || L_prev)
+    Solves the alternating mirror descent step:
+            min_{L : LR \in \Pi_{a,b}} <C, L>_F + (rho / 2) ||L||_F^2
+        or  min_{R : LR \in \Pi_{a,b}} <C, R>_F + (rho / 2) ||R||_F^2
     by solving the unconstrained dual problem for the dual variables 
     alpha and beta.
     """
-    n, m = C.shape
+    n, m = L_fixed.shape[0], R_fixed.shape[1]
     ones_n = jnp.ones(n).reshape(-1, 1)
     ones_m = jnp.ones(m).reshape(-1, 1)
     
@@ -251,12 +250,12 @@ def alternating_proximal_descent_step(
     params = (alpha, beta)
     opt_state = alternating_md_optimizer.init(init_params)
 
+    args = (L_fixed, R_fixed, C, g1, g2, rho)
     for i in range(max_iter): 
-        args = (L, R, C, g1, g2, rho)
         params, opt_state, grads, loss = alternating_proximal_descent_single_step(step_type, params, opt_state, args)
         grad_norm = jnp.linalg.norm(grads[0]) + jnp.linalg.norm(grads[1])
         logger.info(f"Iteration {i}, Loss: {loss}, Grad Norm: {grad_norm}")
-        if grad_norm < 1e-5:
+        if grad_norm < 1e-4:
             break
 
     return params
@@ -277,6 +276,7 @@ def alternating_mirror_descent_low_rank_ot(
     descent with the low rank factorization P = L @ R, where L and R are
     non-negative matrices of shape (n, rank) and (rank, m) respectively.
     """
+
     n, m = C.shape
     if g1.shape != (n,) or g2.shape != (m,):
         raise ValueError("Dimension mismatch between C, g1, and g2.")
@@ -294,12 +294,14 @@ def alternating_mirror_descent_low_rank_ot(
     for i in range(max_iter):
         step_type = ProximalDescentStep.L_STEP if i % 2 == 0 else ProximalDescentStep.R_STEP
 
-        alpha, beta = alternating_proximal_descent_step(C, g1, g2, rho, L, R, step_type)
-
         if step_type == ProximalDescentStep.R_STEP:
-            R = alternating_proximal_descent_compute_R(C, rho, L, R, alpha, beta)
+            C_prime = L.T @ C - rho * R
+            alpha, beta = alternating_proximal_descent_step(C_prime, g1, g2, rho, L, R, step_type)
+            R = alternating_proximal_descent_compute_R(C_prime, rho, L, R, alpha, beta)
         else:
-            L = alternating_proximal_descent_compute_L(C, rho, L, R, alpha, beta)
+            C_prime = C @ R.T - rho * L
+            alpha, beta = alternating_proximal_descent_step(C_prime, g1, g2, rho, L, R, step_type)
+            L = alternating_proximal_descent_compute_L(C_prime, rho, L, R, alpha, beta)
         
         L, R = sinkhorn_rescaling(L, R, g1, g2)
         logger.info(f"Iteration {i} Objective: {jnp.sum(C * (L @ R))}")
@@ -347,7 +349,7 @@ def solve_nuclear_ot(
     return P1, np.sum(C * P1)
 
 @jax.jit
-def sinkhorn_rescaling(L, R, g1, g2, max_iter=5, tol=1e-12):
+def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-8):
     rescaling_rows = True
     for _ in range(max_iter):
         if rescaling_rows:
@@ -396,3 +398,56 @@ def nonnegative_rounding(P, g1, g2, k, seed=0):
     H = model.components_
     L_round, R_round = sinkhorn_rescaling(W, H, g1, g2)
     return L_round, R_round, P_svd
+
+def row_constrained_projection_mosek(X : jnp.ndarray, w : jnp.ndarray):
+    """
+    Solves the problem:
+        min_{Y} 1/2||X - Y||_F^2
+        s.t. \sum_{j=1}^m w_i||y_i||_2 \leq 1
+    where X is a matrix of shape (m, n), w is a vector of shape (m,),
+    and y_i is the i-th row of Y.
+    """
+
+    m, n = X.shape
+    if w.shape != (m,):
+        raise ValueError("Dimension mismatch between X and w.")
+
+    Y = cp.Variable((m, n), nonneg=True)
+    ones_n = np.ones(n)
+
+    constraints = [
+        cp.sum(cp.multiply(cp.norm(Y, axis=1), w)) <= 1
+    ]
+
+    objective = cp.Minimize(0.5 * cp.sum_squares(X - Y))
+    prob = cp.Problem(objective, constraints)
+    prob.solve(solver="MOSEK", verbose=True)
+
+    if prob.status not in ("optimal", "optimal_inaccurate"):
+        raise RuntimeError(f"Solver did not converge: status = {prob.status}")
+
+    return Y.value
+
+def row_constrained_projection(X : jnp.ndarray, w : jnp.ndarray):
+    """
+    Solves the problem:
+        min_{Y} ||X - Y||_F^2
+        s.t. \sum_{j=1}^m w_i||y_i||_2 \leq 1
+    where X is a matrix of shape (m, n), w is a vector of shape (m,),
+    and y_i is the i-th row of Y.
+    """
+
+    X_norms = jnp.linalg.norm(X, axis=1)
+
+    def loss(gamma):
+        return jnp.sum(
+            jnp.where(
+                w * gamma <= X_norms,
+                w * gamma * X_norms - 0.5 * (w * gamma)**2,
+                0.5 * X_norms**2
+            )
+        ) - gamma
+    
+    for gamma in jnp.linspace(0, 10, 1000):
+        print(f"Gamma: {gamma}, Loss: {loss(gamma)}")
+    pass
