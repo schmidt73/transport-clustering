@@ -31,6 +31,7 @@ def visualize_transport_matrix(P, algorithm, primal_cost, rank, show=True):
     plt.colorbar(label='Transport Probability')
     plt.title(f'Inferred Transport Plan: {algorithm.upper()} (rank={rank})')
     plt.xlabel(f'$\\langle C, P\\rangle_F = {primal_cost:.3f}$', fontsize=14)
+    
     if show:
         plt.show()
 
@@ -40,7 +41,7 @@ def parse_args():
     parser.add_argument("-r", "--rank", type=int, default=5)
     parser.add_argument("-s", "--seed", type=int, default=0)
     parser.add_argument("-o", "--output", type=str, default="results")
-    parser.add_argument("-a", "--algorithm", default="clrot", choices=["clrot", "amdlot", "frlc", "lot", "fullrankround"])
+    parser.add_argument("-a", "--algorithm", default="clrot", choices=["clrot", "amdlot", "frlc", "lot", "fullrankround", "monge"])
     parser.add_argument("--restarts", type=int, default=10)
     parser.add_argument("--visualize", action="store_true", help="Visualize transport matrix.")
     return parser.parse_args()
@@ -73,7 +74,7 @@ if __name__ == "__main__":
 
         start_time = time.time()
         L, R = clrot.alternating_mirror_descent_low_rank_ot(
-            C, jnp.array(g1), jnp.array(g2), rank_1=2 * rank, rank_2=rank, rho=1.0, max_iter=20, gamma=gamma
+            C, jnp.array(g1), jnp.array(g2), rank_1=3 * rank, rho=1.0, max_iter=25, gamma=gamma
         )
         P = L @ R
         end_time   = time.time()
@@ -87,6 +88,7 @@ if __name__ == "__main__":
             fig, ax = plt.subplots(figsize=(10, 6))
             sns.scatterplot(x=range(len(singular_values)), y=singular_values, marker='o', ax=ax)
             ax.axvline(x=rank, color='black', linestyle='--', label=f'Rank = {rank}')
+            ax.set_yscale('log')
             ax.set_xlabel('Index')
             ax.set_ylabel('Singular Value')
             
@@ -102,7 +104,7 @@ if __name__ == "__main__":
                 visualize_transport_matrix(L @ R, "CLROT Rounded", jnp.sum(C * (L @ R)), rank, show=False)
 
             L, R = clrot.alternating_mirror_descent_low_rank_ot(
-                C, jnp.array(g1), jnp.array(g2), rank_1=rank, rho=10.0, L_init=L, R_init=R, max_iter=25
+                C, jnp.array(g1), jnp.array(g2), rank_1=rank, rho=10.0, L_init=L, R_init=R, max_iter=40
             )
 
             P_rounded = L @ R
@@ -183,6 +185,7 @@ if __name__ == "__main__":
 
             P = P.cpu().numpy()
             P = clrot.sinkhorn_rescaling_P(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
+            np.savetxt("P.txt", P, fmt="%.8f")
 
             primal_cost = np.sum(C.cpu().numpy() * P)
 
@@ -245,6 +248,24 @@ if __name__ == "__main__":
 
         print(res)
         results.append(res)
+    elif args.algorithm == "monge":
+        geom = Geometry(cost_matrix=C, epsilon=0.0001)
+
+        ot_prob = linear_problem.LinearProblem(geom, g1, g2)
+        start_time = time.time()
+        solver = sinkhorn.Sinkhorn()
+        end_time = time.time()
+        solve_time = end_time - start_time
+        ot_result = solver(ot_prob)
+
+        P = ot_result.matrix
+        np.savetxt("P.txt", P, fmt="%.8f")
+
+        primal_cost = np.sum(C * P)
+
+        if args.visualize:
+            visualize_transport_matrix(P, args.algorithm, primal_cost, rank)   
+
     elif args.algorithm == "fullrankround":
         geom = Geometry(cost_matrix=C, epsilon=0.001)
 

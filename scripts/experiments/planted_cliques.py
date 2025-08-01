@@ -57,8 +57,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("-o", "--output", type=str, default=None, help="output prefix")
     return p.parse_args()
 
-
-def main() -> None:
+def main():
     args = parse_args()
     G = planted_cliques_graph(
         k=args.k,
