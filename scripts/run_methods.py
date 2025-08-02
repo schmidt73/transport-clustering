@@ -3,6 +3,9 @@ import math
 import random
 import torch
 import torchdyn
+import jax
+jax.config.update("jax_enable_x64", True)
+
 import jax.numpy as jnp
 import time
 
@@ -73,9 +76,10 @@ if __name__ == "__main__":
         C = jnp.array(C)
 
         start_time = time.time()
-        L, R = clrot.alternating_mirror_descent_low_rank_ot(
-            C, jnp.array(g1), jnp.array(g2), rank_1=3 * rank, rho=1.0, max_iter=25, gamma=gamma
-        )
+        L, R = clrot.auglag_convex_monge_sep(C, rank_1=rank, rank_2=rank)
+        # L, R = clrot.alternating_mirror_descent_low_rank_ot(
+        #     C, jnp.array(g1), jnp.array(g2), rank_1=3 * rank, rho=1.0, max_iter=25, gamma=gamma
+        # )
         P = L @ R
         end_time   = time.time()
         solve_time = end_time - start_time

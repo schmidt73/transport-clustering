@@ -338,6 +338,184 @@ def alternating_mirror_descent_low_rank_ot(
 
     return L, R
 
+@jax.jit
+def auglag_csp_proj(Q, r):
+    pos_Q = jnp.maximum(0.0, Q)
+    return jnp.sqrt(r) * (pos_Q / jnp.linalg.norm(pos_Q))
+
+def constraints(Q, R):
+    """
+    Computes the constraints for the low-rank factorization.
+    Returns a tuple of four constraints:
+        1. Q @ Q.T @ ones_n - ones_n
+        2. R @ R.T @ ones_n - ones_n
+        3. Q @ R.T @ ones_n - ones_n
+        4. R @ Q.T @ ones_n - ones_n
+    """
+    n = Q.shape[0]
+    ones_n = jnp.ones(n).reshape(-1, 1)
+    diff1 = Q @ Q.T @ ones_n - ones_n
+    diff2 = R @ R.T @ ones_n - ones_n
+    diff3 = Q @ R.T @ ones_n - ones_n
+    diff4 = R @ Q.T @ ones_n - ones_n
+    return diff1, diff2, diff3, diff4
+
+def auglag_csp_loss(C, Q, R, μ, λ):
+    """
+    C : n x n cost matrix
+    Q : n x r matrix
+    R : n x r matrix
+    μ : scalar, penalty parameter for the primal term
+    λ : 4 x n vector, Lagrange multipliers for the constraints
+    """
+    n = C.shape[0]
+    ones_n = jnp.ones(n).reshape(-1, 1) # n x 1 vector of ones
+    primal_term = jnp.sum(Q * (C @ R))
+    diff1, diff2, diff3, diff4 = constraints(Q, R)
+    prox_term = jnp.sum(diff1**2 + diff2**2 + diff3**2 + diff4**2) 
+    lagrangian_penalty = (λ[0] @ diff1 + λ[1] @ diff2 + λ[2] @ diff3 + λ[3] @ diff4)[0]
+    return primal_term + (μ / 2) * prox_term - lagrangian_penalty
+
+auglag_csp_loss_grad = jax.value_and_grad(auglag_csp_loss, argnums=(1, 2))
+auglag_csp_loss_grad = jax.jit(auglag_csp_loss_grad)
+
+def armijo_linesearch(C, Q, R, μ, λ, rank_1, grad_Q, grad_R, direction_Q, direction_R, 
+                     current_loss, alpha_init=1.0, beta=0.5, c=1e-4, max_iters=20):
+    """Backtracking linesearch with Armijo condition."""
+    alpha = alpha_init
+    descent_dir_dot = jnp.sum(grad_Q * direction_Q) + jnp.sum(grad_R * direction_R)
+    
+    for _ in range(max_iters):
+        Q_trial = Q + alpha * direction_Q
+        R_trial = R + alpha * direction_R
+        Q_trial_proj = auglag_csp_proj(Q_trial, rank_1)
+        R_trial_proj = auglag_csp_proj(R_trial, rank_1)
+        trial_loss = auglag_csp_loss(C, Q_trial_proj, R_trial_proj, μ, λ)
+        
+        # Armijo sufficient decrease condition
+        if trial_loss <= current_loss + c * alpha * descent_dir_dot:
+            return alpha, Q_trial_proj, R_trial_proj, trial_loss
+        
+        alpha *= beta
+    
+    # Return minimum alpha if no improvement found
+    Q_min = auglag_csp_proj(Q + alpha * direction_Q, rank_1)
+    R_min = auglag_csp_proj(R + alpha * direction_R, rank_1)
+    loss_min = auglag_csp_loss(C, Q_min, R_min, μ, λ)
+    return alpha, Q_min, R_min, loss_min
+
+def auglag_convex_monge_sep(
+    C: jnp.ndarray, 
+    rank_1: int,
+    rank_2: int = None,
+    max_iter: int = 50,
+    inner_iter: int = 25,
+    tol: float = 1e-3,
+    μ_increase_factor: float = 1.5,
+    μ_init: float = 0.1,
+    learning_rate: float = 1e-6,
+    seed: int = 0
+):
+    """
+    Solve the convex Monge map problem using augmented Lagrangian method.
+    
+    Args:
+        C: Cost matrix (n x n)
+        rank_1: Initial rank
+        rank_2: Target rank for low-rank constraint (if None, use rank_1)
+        max_iter: Maximum number of outer iterations
+        inner_iter: Maximum number of inner iterations for projected gradient descent
+        tol: Convergence tolerance
+        μ_increase_factor: Factor to increase penalty parameter
+        learning_rate: Learning rate for gradient descent
+        seed: Random seed
+    """
+    n = C.shape[0]
+    if n != C.shape[1]:
+        raise ValueError("C must be a square matrix.")
+    
+    rank_2 = rank_1 if rank_2 is None else rank_2
+    
+    # Initialize Q and R randomly with proper normalization
+    key = jax.random.PRNGKey(seed)
+    key1, key2 = jax.random.split(key)
+    
+    # Generate random non-negative matrices
+    Q = jnp.abs(jax.random.normal(key1, (n, rank_2)))
+    R = jnp.abs(jax.random.normal(key2, (n, rank_2)))
+    Q = auglag_csp_proj(Q, rank_1)
+    R = auglag_csp_proj(R, rank_1)
+
+    μ = μ_init
+    λ = jnp.zeros((4, n))
+    
+    ones_n = jnp.ones(n).reshape(-1, 1)
+    best_obj = jnp.inf
+    best_Q, best_R = Q, R
+    
+    armijo_c = 1e-4
+    linesearch_beta = 0.5
+
+    for i in range(max_iter):
+        alpha = 1.0
+        for j in range(inner_iter):
+            loss_val, (grad_Q, grad_R) = auglag_csp_loss_grad(C, Q, R, μ, λ)
+            
+            # Determine descent direction
+            direction_Q = -grad_Q
+            direction_R = -grad_R
+            
+            # Perform linesearch
+            alpha, Q_new, R_new, new_loss = armijo_linesearch(
+                C, Q, R, μ, λ, rank_1,
+                grad_Q, grad_R, 
+                direction_Q, direction_R,
+                loss_val,
+                alpha_init=alpha,
+                beta=linesearch_beta,
+                c=armijo_c
+            )
+            
+            # Compute residual based on actual change after projection
+            step_norm = jnp.linalg.norm(Q_new - Q) + jnp.linalg.norm(R_new - R)
+            Q, R = Q_new, R_new
+            alpha = 1.0
+
+            if j % 5 == 0 or j == inner_iter - 1:
+                print(f"Inner Iteration {j}, Loss: {new_loss:.6f}, Residual: {step_norm:.6f}")
+
+        # Step 2: Update Lagrange multipliers
+        diff1, diff2, diff3, diff4 = constraints(Q, R)
+        print(diff1.shape)
+        λ = λ.at[0].set(λ[0] - μ * diff1[:,0])
+        λ = λ.at[1].set(λ[1] - μ * diff2[:,0])
+        λ = λ.at[2].set(λ[2] - μ * diff3[:,0])
+        λ = λ.at[3].set(λ[3] - μ * diff4[:,0])
+
+        # Step 3: Update penalty parameter μ
+        constraint_violation = jnp.sqrt(jnp.sum(diff1**2 + diff2**2 + diff3**2 + diff4**2))
+        if constraint_violation > tol:
+            μ = μ * μ_increase_factor
+        
+        # Step 4: Compute objective and track best solution
+        P = Q @ R.T
+        obj_value = jnp.sum(C * P)
+        
+        if obj_value < best_obj and constraint_violation < tol:
+            best_obj = obj_value
+            best_Q, best_R = Q, R
+        
+        # Print progress every few iterations
+        logger.info(f"Iteration {i}, Objective: {obj_value:.6f}, Constraint violation: {constraint_violation:.6f}, μ: {μ:.2f}")
+        
+        # Check for convergence
+        if constraint_violation < tol:
+            logger.info(f"Converged at iteration {i}")
+            break
+    
+    # Return the best solution found
+    return best_Q, best_R.T
+
 def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-4):
     rescaling_rows = True
     for _ in range(max_iter):
