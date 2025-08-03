@@ -339,6 +339,10 @@ def alternating_mirror_descent_low_rank_ot(
     return L, R
 
 def auglag_cmp_proj(Q, r):
+    """
+    Solves the projection problem:
+       min{ ||R - Q||_F^2 : ||R||_F^2 = r, R >= 0 }.
+    """
     pos_Q = jnp.maximum(0.0, Q)
     return jnp.sqrt(r) * (pos_Q / jnp.linalg.norm(pos_Q))
 
@@ -368,7 +372,7 @@ def auglag_cmp_loss(C, Q, R, rank, μ, λ):
     λ : 4 x n vector, Lagrange multipliers for the constraints
     """
     n = C.shape[0]
-    ones_n = jnp.ones(n).reshape(-1, 1) # n x 1 vector of ones
+    ones_n = jnp.ones(n).reshape(-1, 1)
     primal_term = jnp.sum(C * (Q @ R.T))
     diff1, diff2, diff3, diff4 = auglag_cmp_constraints(Q, R, rank)
     quad_term = jnp.sum(diff1**2 + diff2**2 + diff3**2 + diff4**2)
@@ -386,13 +390,13 @@ def auglag_convex_monge_sep(
     inner_iter: int = 10000,
     tol: float = 1e-3,
     constraint_tol: float = 1e-4,
-    μ_increase_factor: float = 1.3,
-    μ_init: float = 0.001,
+    μ_increase_factor: float = 2.0,
+    μ_init: float = 0.01,
     init_learning_rate: float = 1e-2,
     seed: int = 0
 ):
     """
-    Solve the convex Monge map problem using augmented Lagrangian method.
+    Solve the convex Monge separation problem using augmented Lagrangian method.
     
     Args:
         C: Cost matrix (n x n)
@@ -431,20 +435,18 @@ def auglag_convex_monge_sep(
             Q_new = auglag_cmp_proj(Q - learning_rate * Q_grad, rank_1)
             R_new = auglag_cmp_proj(R - learning_rate * R_grad, rank_1)
             new_loss = auglag_cmp_loss(C, Q_new, R_new, rank_1, μ, λ)
-            resid = jnp.linalg.norm(Q_new - Q) + jnp.linalg.norm(R_new - R)
-
+            resid = (1 / learning_rate) * (jnp.linalg.norm(Q_new - Q) + jnp.linalg.norm(R_new - R))
             # Armijo line search condition
             # c is the Armijo coefficient (typically between 0.0001 and 0.1)
             c = 0.01
-            armijo_condition = loss - new_loss >= c * learning_rate * (jnp.sum(Q_grad * (Q - Q_new)) + jnp.sum(R_grad * (R - R_new)))
-            if not armijo_condition:
+            if loss - new_loss < c * learning_rate * (jnp.sum(Q_grad * (Q - Q_new)) + jnp.sum(R_grad * (R - R_new))):
                 learning_rate *= 0.9
                 continue
 
             j += 1
             Q, R = Q_new, R_new
             learning_rate = init_learning_rate
-            if j % 10 == 0:
+            if j % 1 == 0:
                 logger.info(f"Inner Iteration {j}, Loss: {loss:.6f}, Residual: {resid:.6f}")
 
             if resid < tol and j > 100:
@@ -467,8 +469,6 @@ def auglag_convex_monge_sep(
         P = Q @ R.T
         obj_value = jnp.sum(C * P)
         
-        
-        
         # Print progress every few iterations
         logger.info(f"Iteration {i}, Objective: {obj_value:.6f}, Constraint violation: {constraint_violation:.6f}, μ: {μ:.2f}")
         
@@ -480,7 +480,7 @@ def auglag_convex_monge_sep(
             break
     
     # Return the best solution found
-    return best_Q, best_R.T
+    return best_Q / n, best_R.T / n
 
 def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-4):
     rescaling_rows = True
