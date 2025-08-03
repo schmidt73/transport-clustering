@@ -357,11 +357,9 @@ def auglag_cmp_constraints(Q, R, rank):
     diff2 = R @ R.T @ ones_n - ones_n
     diff3 = Q @ R.T @ ones_n - ones_n
     diff4 = R @ Q.T @ ones_n - ones_n
-    diff5 = jnp.trace(R.T @ R) - rank
-    diff6 = jnp.trace(Q.T @ Q) - rank
-    return diff1, diff2, diff3, diff4, diff5, diff6
+    return diff1, diff2, diff3, diff4
 
-def auglag_cmp_loss(C, Q, R, rank, μ, λ1, λ2):
+def auglag_cmp_loss(C, Q, R, rank, μ, λ):
     """
     C : n x n cost matrix
     Q : n x r matrix
@@ -372,10 +370,9 @@ def auglag_cmp_loss(C, Q, R, rank, μ, λ1, λ2):
     n = C.shape[0]
     ones_n = jnp.ones(n).reshape(-1, 1) # n x 1 vector of ones
     primal_term = jnp.sum(C * (Q @ R.T))
-    diff1, diff2, diff3, diff4, diff5, diff6 = auglag_cmp_constraints(Q, R, rank)
-    quad_term = jnp.sum(diff1**2 + diff2**2 + diff3**2 + diff4**2 + diff5**2 + diff6**2) 
-    lagrange_term = (λ1[0] @ diff1 + λ1[1] @ diff2 + λ1[2] @ diff3 + λ1[3] @ diff4)[0]
-    lagrange_term += λ2[0] * diff5 + λ2[1] * diff6
+    diff1, diff2, diff3, diff4 = auglag_cmp_constraints(Q, R, rank)
+    quad_term = jnp.sum(diff1**2 + diff2**2 + diff3**2 + diff4**2)
+    lagrange_term = (λ[0] @ diff1 + λ[1] @ diff2 + λ[2] @ diff3 + λ[3] @ diff4)[0]
     return primal_term + (μ / 2) * quad_term - lagrange_term
 
 auglag_cmp_loss_grad = jax.value_and_grad(auglag_cmp_loss, argnums=(1, 2))
@@ -385,13 +382,13 @@ def auglag_convex_monge_sep(
     C: jnp.ndarray, 
     rank_1: int,
     rank_2: int = None,
-    max_iter: int = 50,
+    max_iter: int = 100,
     inner_iter: int = 10000,
-    tol: float = 1e-4,
-    constraint_tol: float = 1e-2,
+    tol: float = 1e-3,
+    constraint_tol: float = 1e-4,
     μ_increase_factor: float = 1.3,
-    μ_init: float = 0.01,
-    init_learning_rate: float = 1e-3,
+    μ_init: float = 0.001,
+    init_learning_rate: float = 1e-2,
     seed: int = 0
 ):
     """
@@ -415,12 +412,11 @@ def auglag_convex_monge_sep(
     rank_2 = rank_1 if rank_2 is None else rank_2
 
     # Initialize Q and R randomly with proper normalization
-    Q, R = initialize_factors(C, jnp.ones(n), jnp.ones(n), rank_1, seed=seed)
+    Q, R = initialize_factors(C, jnp.ones(n), jnp.ones(n), rank_2, seed=seed)
     Q, R = auglag_cmp_proj(Q, rank_1), auglag_cmp_proj(R.T, rank_1)
-    
+
     μ = μ_init
-    λ1 = jnp.zeros((4, n))
-    λ2 = jnp.zeros(2)
+    λ = jnp.zeros((4, n))
     
     ones_n = jnp.ones(n).reshape(-1, 1)
     best_obj = jnp.inf
@@ -431,15 +427,15 @@ def auglag_convex_monge_sep(
         learning_rate = init_learning_rate
         j = 0
         while True:
-            loss, (Q_grad, R_grad) = auglag_cmp_loss_grad(C, Q, R, rank_1, μ, λ1, λ2)
-            Q_new = jnp.maximum(0.0, Q - learning_rate * Q_grad)
-            R_new = jnp.maximum(0.0, R - learning_rate * R_grad)
-            new_loss = auglag_cmp_loss(C, Q_new, R_new, rank_1, μ, λ1, λ2)
+            loss, (Q_grad, R_grad) = auglag_cmp_loss_grad(C, Q, R, rank_1, μ, λ)
+            Q_new = auglag_cmp_proj(Q - learning_rate * Q_grad, rank_1)
+            R_new = auglag_cmp_proj(R - learning_rate * R_grad, rank_1)
+            new_loss = auglag_cmp_loss(C, Q_new, R_new, rank_1, μ, λ)
             resid = jnp.linalg.norm(Q_new - Q) + jnp.linalg.norm(R_new - R)
 
             # Armijo line search condition
             # c is the Armijo coefficient (typically between 0.0001 and 0.1)
-            c = 0.0001
+            c = 0.01
             armijo_condition = loss - new_loss >= c * learning_rate * (jnp.sum(Q_grad * (Q - Q_new)) + jnp.sum(R_grad * (R - R_new)))
             if not armijo_condition:
                 learning_rate *= 0.9
@@ -456,26 +452,22 @@ def auglag_convex_monge_sep(
                 break
         
         # Step 2: Update Lagrange multipliers
-        diff1, diff2, diff3, diff4, diff5, diff6 = auglag_cmp_constraints(Q, R, rank_1)
-        λ1 = λ1.at[0].set(λ1[0] - μ * diff1[:,0])
-        λ1 = λ1.at[1].set(λ1[1] - μ * diff2[:,0])
-        λ1 = λ1.at[2].set(λ1[2] - μ * diff3[:,0])
-        λ1 = λ1.at[3].set(λ1[3] - μ * diff4[:,0])
-        λ2 = λ2.at[0].set(λ2[0] - μ * diff5)
-        λ2 = λ2.at[1].set(λ2[1] - μ * diff6)
+        diff1, diff2, diff3, diff4 = auglag_cmp_constraints(Q, R, rank_1)
+        λ = λ.at[0].set(λ[0] - μ * diff1[:,0])
+        λ = λ.at[1].set(λ[1] - μ * diff2[:,0])
+        λ = λ.at[2].set(λ[2] - μ * diff3[:,0])
+        λ = λ.at[3].set(λ[3] - μ * diff4[:,0])
 
         # Step 3: Update penalty parameter μ
-        constraint_violation = jnp.sqrt(jnp.sum(diff1**2 + diff2**2 + diff3**2 + diff4**2 + diff5**2 + diff6**2))
-        if constraint_violation > tol:
+        constraint_violation = jnp.sqrt(jnp.sum(diff1**2 + diff2**2 + diff3**2 + diff4**2))
+        if constraint_violation > constraint_tol:
             μ = μ * μ_increase_factor
         
         # Step 4: Compute objective and track best solution
         P = Q @ R.T
         obj_value = jnp.sum(C * P)
         
-        if obj_value < best_obj and constraint_violation < constraint_tol:
-            best_obj = obj_value
-            best_Q, best_R = Q, R
+        
         
         # Print progress every few iterations
         logger.info(f"Iteration {i}, Objective: {obj_value:.6f}, Constraint violation: {constraint_violation:.6f}, μ: {μ:.2f}")
@@ -483,6 +475,8 @@ def auglag_convex_monge_sep(
         # Check for convergence
         if constraint_violation < constraint_tol:
             logger.info(f"Converged at iteration {i}")
+            best_obj = obj_value
+            best_Q, best_R = Q, R
             break
     
     # Return the best solution found

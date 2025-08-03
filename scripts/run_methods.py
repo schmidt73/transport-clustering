@@ -76,11 +76,14 @@ if __name__ == "__main__":
         C = jnp.array(C)
 
         start_time = time.time()
-        L, R = clrot.auglag_convex_monge_sep(C, rank_1=rank, rank_2=rank)
+        L, R = clrot.auglag_convex_monge_sep(C, rank_1=rank, rank_2=2*rank)
         # L, R = clrot.alternating_mirror_descent_low_rank_ot(
         #     C, jnp.array(g1), jnp.array(g2), rank_1=3 * rank, rho=1.0, max_iter=25, gamma=gamma
         # )
         P = L @ R
+        print(L.sum(axis=1))
+        print(R.sum(axis=1))
+        print(P.sum(axis=1), P.sum(axis=0))
         end_time   = time.time()
         solve_time = end_time - start_time
         
