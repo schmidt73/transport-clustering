@@ -387,12 +387,12 @@ def auglag_convex_monge_sep(
     rank_1: int,
     rank_2: int = None,
     max_iter: int = 100,
-    inner_iter: int = 10000,
+    inner_iter: int = 100000,
     tol: float = 1e-2,
     constraint_tol: float = 1e-4,
     μ_increase_factor: float = 2.0,
     μ_init: float = 0.01,
-    init_learning_rate: float = 1e-2,
+    init_learning_rate: float = 1e-3,
     seed: int = 0
 ):
     """
@@ -446,7 +446,7 @@ def auglag_convex_monge_sep(
             j += 1
             Q, R = Q_new, R_new
             learning_rate = init_learning_rate
-            if j % 1 == 0:
+            if j % 100 == 0:
                 logger.info(f"Inner Iteration {j}, Loss: {loss:.6f}, Residual: {resid:.6f}")
 
             if resid < tol and j > 100:
@@ -481,6 +481,36 @@ def auglag_convex_monge_sep(
     
     # Return the best solution found
     return best_Q / jnp.sqrt(n), best_R.T / jnp.sqrt(n)
+
+def sdp_convex_monge_sep(C: np.ndarray, rank : int, solver: str = "MOSEK"):
+    n = C.shape[0]
+    if n != C.shape[1]:
+        raise ValueError("C must be a square matrix.")
+
+    P = cp.Variable((n, n), nonneg=True)
+    X = cp.Variable((n, n), nonneg=True)
+    Y = cp.Variable((n, n), nonneg=True)
+
+    ones = np.ones(n)
+
+    constraints = [
+        P @ ones == ones,
+        P.T @ ones == ones,
+        cp.trace(X) == rank,
+        cp.trace(Y) == rank,
+        X @ ones == ones,
+        Y @ ones == ones,
+        cp.bmat([[X, P], [P.T, Y]]) >> 0
+    ]
+
+    objective = cp.Minimize(cp.sum(cp.multiply(C, P)))
+    prob = cp.Problem(objective, constraints)
+    prob.solve(solver=solver, verbose=True)
+
+    if prob.status not in ("optimal", "optimal_inaccurate"):
+        raise RuntimeError(f"Solver did not converge: status = {prob.status}")
+
+    return P.value
 
 def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-4):
     rescaling_rows = True
