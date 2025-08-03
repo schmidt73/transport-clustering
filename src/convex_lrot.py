@@ -388,7 +388,7 @@ def auglag_convex_monge_sep(
     rank_2: int = None,
     max_iter: int = 100,
     inner_iter: int = 10000,
-    tol: float = 1e-3,
+    tol: float = 1e-2,
     constraint_tol: float = 1e-4,
     μ_increase_factor: float = 2.0,
     μ_init: float = 0.01,
@@ -480,7 +480,7 @@ def auglag_convex_monge_sep(
             break
     
     # Return the best solution found
-    return best_Q / n, best_R.T / n
+    return best_Q / jnp.sqrt(n), best_R.T / jnp.sqrt(n)
 
 def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-4):
     rescaling_rows = True

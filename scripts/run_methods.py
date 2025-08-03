@@ -81,14 +81,14 @@ if __name__ == "__main__":
         #     C, jnp.array(g1), jnp.array(g2), rank_1=3 * rank, rho=1.0, max_iter=25, gamma=gamma
         # )
         P = L @ R
-        print(L.sum(axis=1))
-        print(R.sum(axis=1))
-        print(P.sum(axis=1), P.sum(axis=0))
+        
         end_time   = time.time()
         solve_time = end_time - start_time
         
         if args.visualize:
             visualize_transport_matrix(P, "CLROT Raw", jnp.sum(C * P), rank, show=False)
+            visualize_transport_matrix(L, "L matrix", 0.0, rank, show=False)
+            visualize_transport_matrix(R.T, "R matrix", 0.0, rank, show=False)
 
             singular_values = jnp.linalg.norm(L, axis=0) * jnp.linalg.norm(R, axis=1)
             singular_values = jnp.sort(singular_values)[::-1]
