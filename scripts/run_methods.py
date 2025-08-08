@@ -61,6 +61,7 @@ if __name__ == "__main__":
     dtype  = torch.float64
 
     C = np.loadtxt(args.cost_matrix)
+    print(C.max())
     C = C / C.max() # normalize cost matrix
     batch_size1 = C.shape[0]
     batch_size2 = C.shape[1]
@@ -76,19 +77,17 @@ if __name__ == "__main__":
         C = jnp.array(C)
 
         start_time = time.time()
-        L, R = clrot.auglag_convex_monge_sep(C, rank_1=rank, rank_2=2*rank)
-        # L, R = clrot.alternating_mirror_descent_low_rank_ot(
-        #     C, jnp.array(g1), jnp.array(g2), rank_1=3 * rank, rho=1.0, max_iter=25, gamma=gamma
-        # )
-        P = L @ R
-        
+        #L, R = clrot.auglag_convex_monge_sep(C, rank_1=rank, rank_2=rank, seed=args.seed)
+        #P = L @ R
+        P, X, Y = clrot.sdp_convex_monge_sep(C, rank, solver="SCS")
+        print(jnp.sum(jnp.abs(P - P.T)))
         end_time   = time.time()
         solve_time = end_time - start_time
         
         if args.visualize:
-            visualize_transport_matrix(P, "CLROT Raw", jnp.sum(C * P), rank, show=False)
-            visualize_transport_matrix(L, "L matrix", 0.0, rank, show=False)
-            visualize_transport_matrix(R.T, "R matrix", 0.0, rank, show=False)
+            visualize_transport_matrix(P, "CLROT Raw", jnp.sum(C * P), rank, show=False)            
+            visualize_transport_matrix(X, "X matrix", 0.0, rank, show=False)
+            visualize_transport_matrix(Y, "Y matrix", 0.0, rank, show=True)
 
             singular_values = jnp.linalg.norm(L, axis=0) * jnp.linalg.norm(R, axis=1)
             singular_values = jnp.sort(singular_values)[::-1]

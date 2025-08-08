@@ -281,11 +281,9 @@ def alternating_relaxed_proximal_descent_R_admm(
     return R1
 
 def alternating_mirror_descent_low_rank_ot(
-    C: jnp.ndarray, 
-    g1: jnp.ndarray, 
-    g2: jnp.ndarray, 
-    rank_1 : int,
-    rank_2 : int = None,
+    C: jnp.ndarray,
+    rank_1: int,
+    rank_2: int = None,
     rho: float = 1.0,
     gamma: float = 1.0,
     seed: int = 0,
@@ -354,6 +352,8 @@ def auglag_cmp_constraints(Q, R, rank):
         2. R @ R.T @ ones_n - ones_n
         3. Q @ R.T @ ones_n - ones_n
         4. R @ Q.T @ ones_n - ones_n
+        5. trace(R.T @ R) - rank
+        6. trace(Q.T @ Q) - rank
     """
     n = Q.shape[0]
     ones_n = jnp.ones(n).reshape(-1, 1)
@@ -361,9 +361,11 @@ def auglag_cmp_constraints(Q, R, rank):
     diff2 = R @ R.T @ ones_n - ones_n
     diff3 = Q @ R.T @ ones_n - ones_n
     diff4 = R @ Q.T @ ones_n - ones_n
-    return diff1, diff2, diff3, diff4
+    diff5 = jnp.trace(R.T @ R) - rank
+    diff6 = jnp.trace(Q.T @ Q) - rank
+    return diff1, diff2, diff3, diff4, diff5, diff6
 
-def auglag_cmp_loss(C, Q, R, rank, μ, λ):
+def auglag_cmp_loss(C, Q, R, rank, μ, λ1, λ2):
     """
     C : n x n cost matrix
     Q : n x r matrix
@@ -371,27 +373,61 @@ def auglag_cmp_loss(C, Q, R, rank, μ, λ):
     μ : scalar, penalty parameter for the primal term
     λ : 4 x n vector, Lagrange multipliers for the constraints
     """
+    Q = jnp.exp(Q)  # Ensure Q is non-negative
+    R = jnp.exp(R)  # Ensure R is non-negative
     n = C.shape[0]
-    ones_n = jnp.ones(n).reshape(-1, 1)
-    primal_term = jnp.sum(C * (Q @ R.T))
-    diff1, diff2, diff3, diff4 = auglag_cmp_constraints(Q, R, rank)
-    quad_term = jnp.sum(diff1**2 + diff2**2 + diff3**2 + diff4**2)
-    lagrange_term = (λ[0] @ diff1 + λ[1] @ diff2 + λ[2] @ diff3 + λ[3] @ diff4)[0]
+    ones_n = jnp.ones(n).reshape(-1, 1) # n x 1 vector of ones
+    primal_term = jnp.sum((Q.T @ C) * R.T)
+    diff1, diff2, diff3, diff4, diff5, diff6 = auglag_cmp_constraints(Q, R, rank)
+    quad_term = jnp.sum(diff1**2 + diff2**2 + diff3**2 + diff4**2 + diff5**2 + diff6**2) 
+    lagrange_term = (λ1[0] @ diff1 + λ1[1] @ diff2 + λ1[2] @ diff3 + λ1[3] @ diff4)[0]
+    lagrange_term += λ2[0] * diff5 + λ2[1] * diff6
     return primal_term + (μ / 2) * quad_term - lagrange_term
 
-auglag_cmp_loss_grad = jax.value_and_grad(auglag_cmp_loss, argnums=(1, 2))
-auglag_cmp_loss_grad = jax.jit(auglag_cmp_loss_grad)
+def auglag_cmp_loss_wrap(params, args):
+    """
+    Wrapper for the augmented Lagrangian loss function.
+    """
+    Q, R = params
+    C, rank, μ, λ1, λ2 = args
+    return auglag_cmp_loss(C, Q, R, rank, μ, λ1, λ2)
+
+auglag_cmp_loss_grad_wrap = jax.value_and_grad(auglag_cmp_loss_wrap)
+#auglag_cmp_loss_grad_wrap = jax.jit(auglag_cmp_loss_grad_wrap)
+
+linesearch = optax.scale_by_backtracking_linesearch(max_backtracking_steps=15)
+opt = optax.chain(optax.lbfgs(scale_init_precond=True), linesearch)
+
+@jax.jit
+def auglag_convex_monge_sep_inner_step(C, Q, R, rank, μ, λ1, λ2, tol=1e-2, init_learning_rate=1e-4):
+    args = (C, rank, μ, λ1, λ2)
+    params = (jnp.log(Q), jnp.log(R))  # Use log to ensure positivity
+    state = opt.init(params)
+
+    def body_fun(carry, _):
+        params, state = carry
+        loss, grad = auglag_cmp_loss_grad_wrap(params, args)
+
+        updates, state = opt.update(
+            grad, state, params, value=loss, grad=grad, value_fn=auglag_cmp_loss_wrap, args=args
+        )
+
+        params = optax.apply_updates(params, updates)
+        return (params, state), None
+    
+    (params, state), _ = jax.lax.scan(body_fun, (params, state), jnp.arange(2500))
+    return jnp.exp(params[0]), jnp.exp(params[1])  # Return back to original scale
 
 def auglag_convex_monge_sep(
     C: jnp.ndarray, 
     rank_1: int,
     rank_2: int = None,
-    max_iter: int = 100,
+    max_iter: int = 20,
     inner_iter: int = 100000,
     tol: float = 1e-2,
-    constraint_tol: float = 1e-4,
+    constraint_tol: float = 1e-3,
     μ_increase_factor: float = 2.0,
-    μ_init: float = 0.01,
+    μ_init: float = 1.0,
     init_learning_rate: float = 1e-3,
     seed: int = 0
 ):
@@ -420,48 +456,27 @@ def auglag_convex_monge_sep(
     Q, R = auglag_cmp_proj(Q, rank_1), auglag_cmp_proj(R.T, rank_1)
 
     μ = μ_init
-    λ = jnp.zeros((4, n))
-    
+    λ1, λ2, λ3, λ4 = jnp.zeros((4, n)), jnp.zeros(2), jnp.zeros(Q.shape[1]), jnp.zeros(R.shape[1])
+
     ones_n = jnp.ones(n).reshape(-1, 1)
     best_obj = jnp.inf
     best_Q, best_R = Q, R
     
     for i in range(max_iter):
         # Step 1: Use L-BFGS to optimize Q and R
-        learning_rate = init_learning_rate
-        j = 0
-        while True:
-            loss, (Q_grad, R_grad) = auglag_cmp_loss_grad(C, Q, R, rank_1, μ, λ)
-            Q_new = auglag_cmp_proj(Q - learning_rate * Q_grad, rank_1)
-            R_new = auglag_cmp_proj(R - learning_rate * R_grad, rank_1)
-            new_loss = auglag_cmp_loss(C, Q_new, R_new, rank_1, μ, λ)
-            resid = (1 / learning_rate) * (jnp.linalg.norm(Q_new - Q) + jnp.linalg.norm(R_new - R))
-            # Armijo line search condition
-            # c is the Armijo coefficient (typically between 0.0001 and 0.1)
-            c = 0.01
-            if loss - new_loss < c * learning_rate * (jnp.sum(Q_grad * (Q - Q_new)) + jnp.sum(R_grad * (R - R_new))):
-                learning_rate *= 0.9
-                continue
+        Q, R = auglag_convex_monge_sep_inner_step(C, Q, R, rank_1, μ, λ1, λ2, tol=tol, init_learning_rate=init_learning_rate)
 
-            j += 1
-            Q, R = Q_new, R_new
-            learning_rate = init_learning_rate
-            if j % 100 == 0:
-                logger.info(f"Inner Iteration {j}, Loss: {loss:.6f}, Residual: {resid:.6f}")
-
-            if resid < tol and j > 100:
-                logger.info(f"Inner loop converged at iteration {j}")
-                break
-        
         # Step 2: Update Lagrange multipliers
-        diff1, diff2, diff3, diff4 = auglag_cmp_constraints(Q, R, rank_1)
-        λ = λ.at[0].set(λ[0] - μ * diff1[:,0])
-        λ = λ.at[1].set(λ[1] - μ * diff2[:,0])
-        λ = λ.at[2].set(λ[2] - μ * diff3[:,0])
-        λ = λ.at[3].set(λ[3] - μ * diff4[:,0])
+        diff1, diff2, diff3, diff4, diff5, diff6 = auglag_cmp_constraints(Q, R, rank_1)
+        λ1 = λ1.at[0].set(λ1[0] - μ * diff1[:,0])
+        λ1 = λ1.at[1].set(λ1[1] - μ * diff2[:,0])
+        λ1 = λ1.at[2].set(λ1[2] - μ * diff3[:,0])
+        λ1 = λ1.at[3].set(λ1[3] - μ * diff4[:,0])
+        λ2 = λ2.at[0].set(λ2[0] - μ * diff5)
+        λ2 = λ2.at[1].set(λ2[1] - μ * diff6)
 
         # Step 3: Update penalty parameter μ
-        constraint_violation = jnp.sqrt(jnp.sum(diff1**2 + diff2**2 + diff3**2 + diff4**2))
+        constraint_violation = jnp.sqrt(jnp.sum(diff1**2 + diff2**2 + diff3**2 + diff4**2 + diff5**2 + diff6**2))
         if constraint_violation > constraint_tol:
             μ = μ * μ_increase_factor
         
@@ -472,11 +487,12 @@ def auglag_convex_monge_sep(
         # Print progress every few iterations
         logger.info(f"Iteration {i}, Objective: {obj_value:.6f}, Constraint violation: {constraint_violation:.6f}, μ: {μ:.2f}")
         
+        best_Q, best_R = Q, R
+
         # Check for convergence
         if constraint_violation < constraint_tol:
             logger.info(f"Converged at iteration {i}")
             best_obj = obj_value
-            best_Q, best_R = Q, R
             break
     
     # Return the best solution found
@@ -496,11 +512,13 @@ def sdp_convex_monge_sep(C: np.ndarray, rank : int, solver: str = "MOSEK"):
     constraints = [
         P @ ones == ones,
         P.T @ ones == ones,
-        cp.trace(X) == rank,
-        cp.trace(Y) == rank,
+        cp.trace(X) <= rank,
+        cp.trace(Y) <= rank,
         X @ ones == ones,
         Y @ ones == ones,
-        cp.bmat([[X, P], [P.T, Y]]) >> 0
+        cp.bmat([[X, P], [P.T, Y]]) >> 0,
+        #cp.diag(Y) == (rank / n) * ones,
+        #cp.diag(X) == (rank / n) * ones,
     ]
 
     objective = cp.Minimize(cp.sum(cp.multiply(C, P)))
@@ -510,7 +528,7 @@ def sdp_convex_monge_sep(C: np.ndarray, rank : int, solver: str = "MOSEK"):
     if prob.status not in ("optimal", "optimal_inaccurate"):
         raise RuntimeError(f"Solver did not converge: status = {prob.status}")
 
-    return P.value
+    return P.value / n, X.value / n, Y.value / n
 
 def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-4):
     rescaling_rows = True
