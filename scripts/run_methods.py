@@ -25,6 +25,8 @@ sys.path.append("../src")
 
 import FRLC.FRLC as frlc
 import convex_lrot as clrot
+from sklearn.cluster import KMeans
+import umap
 
 def visualize_transport_matrix(P, algorithm, primal_cost, rank, show=True):
     P_np = P if isinstance(P, np.ndarray) else np.array(P)
@@ -33,7 +35,7 @@ def visualize_transport_matrix(P, algorithm, primal_cost, rank, show=True):
     plt.imshow(P_np, cmap='viridis', interpolation='nearest')
     plt.colorbar(label='Transport Probability')
     plt.title(f'Inferred Transport Plan: {algorithm.upper()} (rank={rank})')
-    plt.xlabel(f'$\\langle C, P\\rangle_F = {primal_cost:.3f}$', fontsize=14)
+    plt.xlabel(f'$\\langle C, P\\rangle_F = {primal_cost:.5f}$', fontsize=14)
     
     if show:
         plt.show()
@@ -79,35 +81,75 @@ if __name__ == "__main__":
         start_time = time.time()
         #L, R = clrot.auglag_convex_monge_sep(C, rank_1=rank, rank_2=rank, seed=args.seed)
         #P = L @ R
-        P, X, Y = clrot.sdp_convex_monge_sep(C, rank, solver="SCS")
-        print(jnp.sum(jnp.abs(P - P.T)))
+        print(C - C.T)
+        P, X, Y = clrot.sdp_convex_monge_sep_reparam(C, rank, solver="SCS")
+        C_tilde, P_rounded_fac = clrot.sdp_rounding(C, X, Y, rank, strategy="factors")
+        # clrot.sdp_convex_monge_sep(C_tilde, rank, solver="SCS")
+        P_rounded_fac = clrot.sinkhorn_rescaling_P(P_rounded_fac, g1, g2, max_iter=1000, tol=1e-5) # round all solutions to be 1e-5 feasible
+        print(P_rounded_fac.sum(axis=1))
+        print(P_rounded_fac.sum(axis=0))
+        print(jnp.sum(C_tilde.cpu().numpy() * P * P.shape[0]))
+        # _, P_rounded_euc = clrot.sdp_rounding(C, X, Y, rank, strategy="euclidean")
         end_time   = time.time()
         solve_time = end_time - start_time
         
         if args.visualize:
             visualize_transport_matrix(P, "CLROT Raw", jnp.sum(C * P), rank, show=False)            
+            # visualize_transport_matrix(P_rounded_euc, "CLROT Rounded (Euclidean)", jnp.sum(C * P_rounded_euc), rank, show=False)            
+            visualize_transport_matrix(P_rounded_fac, "CLROT Rounded (Factors)", jnp.sum(C * P_rounded_fac), rank, show=False)
+            visualize_transport_matrix(C_tilde, "$C_Tilde", jnp.sum(C * P_rounded_fac), rank, show=False)
+            visualize_transport_matrix(C, "C", jnp.sum(C * P_rounded_fac), rank, show=False)
             visualize_transport_matrix(X, "X matrix", 0.0, rank, show=False)
             visualize_transport_matrix(Y, "Y matrix", 0.0, rank, show=True)
 
-            singular_values = jnp.linalg.norm(L, axis=0) * jnp.linalg.norm(R, axis=1)
-            singular_values = jnp.sort(singular_values)[::-1]
-            fig, ax = plt.subplots(figsize=(10, 6))
-            sns.scatterplot(x=range(len(singular_values)), y=singular_values, marker='o', ax=ax)
-            ax.axvline(x=rank, color='black', linestyle='--', label=f'Rank = {rank}')
-            ax.set_yscale('log')
-            ax.set_xlabel('Index')
-            ax.set_ylabel('Singular Value')
+            n = X.shape[0]
+            X_centered = X# - (1/n) * jnp.ones((n, n))
+            
+            eigenvalues, eigenvectors = jnp.linalg.eigh(X_centered)
+            
+            idx = jnp.argsort(eigenvalues)[::-1]
+            eigenvalues = eigenvalues[idx]
+            eigenvectors = eigenvectors[:, idx]
+            
+            top_eigenvectors = eigenvectors[:, :rank]
+            visualize_transport_matrix(top_eigenvectors, "Top Eigenvectors", 0.0, rank, show=False)
+            # Perform k-means clustering on rows of top_eigenvectors
+            kmeans = KMeans(n_clusters=rank, random_state=args.seed)
+            clusters = kmeans.fit_predict(top_eigenvectors)
+            logger.info(f"K-means clustering labels: {clusters}")
+            # Visualize the clusters using UMAP
+            
+            # Create UMAP embedding
+            reducer = umap.UMAP(n_components=2, random_state=args.seed)
+            embedding = reducer.fit_transform(top_eigenvectors)
+            
+            # Plot the UMAP embedding with cluster colors
+            plt.figure(figsize=(10, 8))
+            plt.scatter(embedding[:, 0], embedding[:, 1], c=clusters, cmap='viridis', marker='o', s=50)
+            plt.title('K-means Clustering Visualized with UMAP')
+            plt.xlabel('UMAP Dimension 1')
+            plt.ylabel('UMAP Dimension 2')
+            plt.colorbar(label='Cluster')
+            plt.show()
+
+            # singular_values = eigenvalues
+            # fig, ax = plt.subplots(figsize=(10, 6))
+            # sns.scatterplot(x=range(len(singular_values)), y=singular_values, marker='o', ax=ax)
+            # ax.axvline(x=rank, color='black', linestyle='--', label=f'Rank = {rank}')
+            # ax.set_yscale('log')
+            # ax.set_xlabel('Index')
+            # ax.set_ylabel('Singular Value')
             
         for i in range(args.restarts):
             start_time = time.time()
-            L, R = clrot.nonnegative_rounding(L, R, g1, g2, rank, seed=args.seed + i)
+            L, R, _ = clrot.nonnegative_rounding_P(P, g1, g2, rank, seed=args.seed + i)
             L, R = jnp.clip(L, 1e-8), jnp.clip(R, 1e-8)  # ensure strictly positive entries
             end_time   = time.time()
             round_time = end_time - start_time
             L, R = clrot.sinkhorn_rescaling(L, R, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
 
             if args.visualize:
-                visualize_transport_matrix(L @ R, "CLROT Rounded", jnp.sum(C * (L @ R)), rank, show=False)
+                visualize_transport_matrix(L @ R, "CLROT Rounded", jnp.sum(C * (L @ R)), rank, show=True)
 
             L, R = clrot.alternating_mirror_descent_low_rank_ot(
                 C, jnp.array(g1), jnp.array(g2), rank_1=rank, rho=10.0, L_init=L, R_init=R, max_iter=40

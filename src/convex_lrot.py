@@ -12,6 +12,13 @@ from sklearn.decomposition import NMF
 import optax
 import enum
 
+from ott.initializers.linear.initializers_lr import RandomInitializer, KMeansInitializer, Rank2Initializer
+from ott.geometry.geometry import Geometry
+from ott.problems.linear import linear_problem
+from ott.solvers.linear import sinkhorn, sinkhorn_lr
+
+import scipy.spatial.distance
+
 class ProximalDescentStep(enum.Enum):
     L_STEP = "L_STEP"
     R_STEP = "R_STEP"
@@ -498,6 +505,34 @@ def auglag_convex_monge_sep(
     # Return the best solution found
     return best_Q / jnp.sqrt(n), best_R.T / jnp.sqrt(n)
 
+def sdp_convex_monge_sep_reparam(C: np.ndarray, rank: int, solver: str = "MOSEK"):
+    n = C.shape[0]
+    assert C.shape == (n, n)
+
+    Z = cp.Variable((2*n, 2*n), PSD=True)
+    X = Z[:n, :n]
+    P = Z[:n, n:]
+    Y = Z[n:, n:]
+    ones = np.ones(n)
+
+    cons = [
+        P @ ones == ones,
+        P.T @ ones == ones,
+        cp.trace(X) == rank,
+        cp.trace(Y) == rank,
+        X @ ones == ones,
+        Y @ ones == ones,
+        Z >= 0
+    ]
+    obj = cp.Minimize(cp.sum(cp.multiply(C, P)))
+    prob = cp.Problem(obj, cons)
+    prob.solve(solver=solver)
+
+    if prob.status not in ("optimal", "optimal_inaccurate"):
+        raise RuntimeError(f"status = {prob.status}")
+
+    return P.value / n, X.value, Y.value
+
 def sdp_convex_monge_sep(C: np.ndarray, rank : int, solver: str = "MOSEK"):
     n = C.shape[0]
     if n != C.shape[1]:
@@ -512,8 +547,8 @@ def sdp_convex_monge_sep(C: np.ndarray, rank : int, solver: str = "MOSEK"):
     constraints = [
         P @ ones == ones,
         P.T @ ones == ones,
-        cp.trace(X) <= rank,
-        cp.trace(Y) <= rank,
+        cp.trace(X) == rank,
+        cp.trace(Y) == rank,
         X @ ones == ones,
         Y @ ones == ones,
         cp.bmat([[X, P], [P.T, Y]]) >> 0,
@@ -528,7 +563,50 @@ def sdp_convex_monge_sep(C: np.ndarray, rank : int, solver: str = "MOSEK"):
     if prob.status not in ("optimal", "optimal_inaccurate"):
         raise RuntimeError(f"Solver did not converge: status = {prob.status}")
 
-    return P.value / n, X.value / n, Y.value / n
+    return P.value / n, X.value, Y.value
+
+import FRLC.FRLC as frlc
+import torch
+def sdp_rounding(C : np.ndarray, X : np.ndarray, Y : np.ndarray, rank: int, strategy):
+    n = C.shape[0]
+
+    assert C.shape[1] == n,   "C must be a square matrix."
+    assert X.shape == (n, n), "X must be a square matrix of the same size as C."
+    assert Y.shape == (n, n), "Y must be a square matrix of the same size as C."
+
+    def matrix_sqrt(A):
+        U, s, Vh = np.linalg.svd(A)
+        return U[:, :rank] @ np.diag(s[:rank]) @ Vh[:rank, :]
+    
+    def eigenvectors(A):
+        eigenvalues, eigenvectors = np.linalg.eigh(A)
+        idx = np.argsort(eigenvalues)[::-1]
+        eigenvalues = eigenvalues[idx]
+        eigenvectors = eigenvectors[:, idx]
+        print(eigenvectors)
+        return eigenvectors[:, :rank] @ np.diag(eigenvalues[:rank])
+    
+    if strategy == "euclidean":
+        X_sqrt = eigenvectors(X)
+        Y_sqrt = eigenvectors(Y)
+        C_tilde = scipy.spatial.distance.cdist(X @ C, C @ Y, metric='sqeuclidean')
+    else:
+        X_sqrt = matrix_sqrt(X)
+        Y_sqrt = matrix_sqrt(Y)
+        C_tilde = X_sqrt @ C @ Y_sqrt.T
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    C_tilde = torch.from_numpy(np.array(C_tilde)).to(device)
+    P, errs = frlc.FRLC_opt(
+        C_tilde, device=device, r=rank, max_iter=20, returnFull=True, gamma=70, max_inneriters_balanced=500, max_inneriters_relaxed=500
+    )
+    return C_tilde, P.cpu().numpy()
+    
+    geom = Geometry(cost_matrix=C_tilde)
+    ot_prob = linear_problem.LinearProblem(geom, np.ones(n) / n, np.ones(n) / n)
+    solver = sinkhorn_lr.LRSinkhorn(rank=rank, initializer=RandomInitializer(rank))
+    ot_lr = solver(ot_prob)
+    return C_tilde, X_sqrt @ ot_lr.matrix @ Y_sqrt
 
 def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-4):
     rescaling_rows = True
