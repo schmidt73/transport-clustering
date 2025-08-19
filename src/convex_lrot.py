@@ -14,8 +14,11 @@ def monge(C):
     n = C.shape[0]
     P = cp.Variable((n, n), nonneg=True)
     objective = cp.Minimize(cp.sum(cp.multiply(C, P)))
-    constraints = [cp.sum(P, axis=0) == 1, cp.sum(P, axis=1) == 1]
-    prob = cp.Problem(objective, constraints)
+    constraints = [
+        cp.sum(P, axis=0) == 1, 
+        cp.sum(P, axis=1) == 1
+    ]
+    prob = cp.Problem((1 / n) * objective, constraints)
     prob.solve(solver=cp.MOSEK, verbose=True)
     return P.value
 
@@ -30,20 +33,21 @@ def sdp_subproblem(C, rank):
         cp.trace(P) == rank, 
         P >= 0
     ]
-    prob = cp.Problem(objective, constraints)
-    prob.solve(solver=cp.SCS, verbose=True)
+    prob = cp.Problem((1 / n) * objective, constraints)
+    prob.solve(solver=cp.MOSEK, verbose=True)
     return P.value
 
-def solve_lrot(C, rank, key=random.PRNGKey(0), beta=10., alpha=1e-6, tol=1e-6, tol_primal=1e-3, maxiter=50000):
+def solve_lrot(C, rank):
     assert C.shape[0] == C.shape[1], "C must be a square matrix"
+    n = C.shape[0]
 
     P = monge(C)
-    C_tilde = C @ P
+    C_tilde = C @ P.T
     U = sdp_subproblem(C_tilde, rank)
 
     n = U.shape[0]
-    _, eigvecs = jnp.linalg.eigh(U)
-    top_eigvecs = eigvecs[:, -rank:]
+    _, eigvecs = jnp.linalg.eigh(U - (1 / n) * jnp.ones((n, n)))
+    top_eigvecs = eigvecs[:, -(rank-1):]
 
     kmeans = KMeans(n_clusters=rank, random_state=0).fit(top_eigvecs)
     labels = kmeans.labels_
@@ -51,7 +55,7 @@ def solve_lrot(C, rank, key=random.PRNGKey(0), beta=10., alpha=1e-6, tol=1e-6, t
     Q = jnp.zeros((n, rank))
     for i in range(n):
         Q = Q.at[i, labels[i]].set(1)
-    R = P @ Q
+    R = P.T @ Q
     return Q @ jnp.linalg.inv(Q.T @ Q), R
     
 def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-4):
