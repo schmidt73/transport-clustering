@@ -22,6 +22,67 @@ def monge(C):
     prob.solve(solver=cp.MOSEK, verbose=True)
     return P.value
 
+def sdp_subproblem_auglag(
+    C: jnp.ndarray, K: int, *, r: int | None = None,
+    beta: float = 10.0, alpha: float = 1e-6,
+    tol: float = 1e-6, tol_primal: float = 1e-3,
+    maxiter: int = 50_000, key: jax.Array | None = None,
+    verbose: bool = False, log_every: int = 1000
+):
+    n = C.shape[0]
+    r = 2 * K if r is None else r
+    if key is None: key = jax.random.PRNGKey(0)
+
+    one = jnp.ones((n, 1))
+    norm_one = jnp.linalg.norm(one)
+    sqrtK = jnp.sqrt(K)
+
+    def project(V):
+        Vp = jnp.maximum(V, 0.0)
+        nf = jnp.sqrt(jnp.sum(Vp * Vp))
+        scale = jnp.where(nf > 0, sqrtK / nf, 0.0)
+        return Vp * scale
+
+    def compute_objective(U, y):
+        return (
+            jnp.sum(C * (U @ U.T)) + jnp.sum(y * (U @ (U.T @ one) - one)) 
+            + (beta / 2) * jnp.sum((U @ (U.T @ one) - one) ** 2)
+        )
+
+    compute_obj_and_grad = jax.jit(jax.value_and_grad(compute_objective, argnums=0))
+
+    y = jnp.zeros((n, 1))
+    U = project(jax.random.uniform(key, (n, r), minval=0.0, maxval=1.0 / n))
+
+    alpha_prime = alpha
+    for it in range(1, maxiter + 1):
+        obj, G = compute_obj_and_grad(U, y)
+        Unew = project(U - alpha_prime * G)
+        resid = (1 / alpha) * jnp.linalg.norm(Unew - U)
+
+        if obj < compute_objective(Unew, y):
+            alpha_prime = 0.9 * alpha_prime
+        else:
+            U = Unew
+            alpha_prime = alpha_prime * 1.1
+
+        if float(resid) < tol_primal:
+            print("here")
+            infeas = Unew @ (Unew.T @ one) - one
+            y = y + beta * infeas
+
+        if verbose and (it % log_every == 0):
+            infeas_now = U @ (U.T @ one) - one
+            obj = jnp.sum(C * (U @ U.T)) / n
+            logger.info(
+                f"[{it}] resid={float(resid):.3e}  "
+                f"infeas={float(jnp.linalg.norm(infeas_now)/norm_one):.3e}  "
+                f"obj={float(obj):.6e} "
+                f"alpha={float(alpha_prime):.3e}"
+            )
+
+    return U
+
 def sdp_subproblem(C, rank):
     """Solve the SDP subproblem."""
     n = C.shape[0]
@@ -34,7 +95,7 @@ def sdp_subproblem(C, rank):
         P >= 0
     ]
     prob = cp.Problem((1 / n) * objective, constraints)
-    prob.solve(solver=cp.MOSEK, verbose=True)
+    prob.solve(solver=cp.SCS, verbose=True)
     return P.value
 
 def solve_lrot(C, rank):
@@ -43,7 +104,9 @@ def solve_lrot(C, rank):
 
     P = monge(C)
     C_tilde = C @ P.T
-    U = sdp_subproblem(C_tilde, rank)
+    #U = sdp_subproblem(C_tilde, rank)
+    U = sdp_subproblem_auglag(C_tilde, rank, verbose=True)
+    U = U @ U.T
 
     n = U.shape[0]
     _, eigvecs = jnp.linalg.eigh(U - (1 / n) * jnp.ones((n, n)))
