@@ -77,10 +77,17 @@ if __name__ == "__main__":
     if args.algorithm == "clrot":
         gamma = (1.0 / min(batch_size1, batch_size2))
         C = jnp.array(C)
-        Q, R = clrot.solve_lrot(C, rank)
+        Q, R, objective_values = clrot.solve_lrot(C, rank)
+        objective_values = objective_values[1000:]
         P = Q @ R.T
-        visualize_transport_matrix(P, args.algorithm, jnp.sum(C * P) / batch_size1, rank)
-        print(P.sum(axis=0), P.sum(axis=1))
+        visualize_transport_matrix(P, args.algorithm, jnp.sum(C * P) / batch_size1, rank, show=False)
+        fig, ax = plt.subplots()
+        sns.scatterplot(x=list(range(objective_values.shape[0])), y=objective_values, 
+                        ax=ax, color="orange", edgecolor=None, s=20)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Objective Value")
+        fig.tight_layout()
+        plt.show()
     elif args.algorithm == "amdlot":
         gamma = (1.0 / min(batch_size1, batch_size2))
         C = jnp.array(C)

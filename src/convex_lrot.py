@@ -22,11 +22,14 @@ def monge(C):
     prob.solve(solver=cp.MOSEK, verbose=True)
     return P.value
 
-def sdp_subproblem_auglag(
+def tree_where(cond, a, b):
+    return jax.tree_util.tree_map(lambda x, y: jnp.where(cond, x, y), a, b)
+
+def sdp_subproblem_bm(
     C: jnp.ndarray, K: int, *, r: int | None = None,
     beta: float = 20.0, alpha: float = 1e-6,
     tol: float = 1e-6, tol_primal: float = 1e-2,
-    maxiter: int = 100_000, key: jax.Array | None = None,
+    nu : float = 0.9,  maxiter: int = 50_000, key: jax.Array | None = None,
     verbose: bool = False, log_every: int = 1000
 ):
     n = C.shape[0]
@@ -45,42 +48,38 @@ def sdp_subproblem_auglag(
 
     def compute_objective(U, y):
         return (
-            jnp.sum(C * (U @ U.T)) + jnp.sum(y * (U @ (U.T @ one) - one)) 
+            jnp.trace((U.T @ C.T) @ U) + jnp.sum(y * (U @ (U.T @ one) - one)) 
             + (beta / 2) * jnp.sum((U @ (U.T @ one) - one) ** 2)
         )
 
-    compute_obj_and_grad = jax.jit(jax.value_and_grad(compute_objective, argnums=0))
+    compute_obj_and_grad = jax.value_and_grad(compute_objective, argnums=0)
 
     y = jnp.zeros((n, 1))
     U = project(jax.random.uniform(key, (n, r), minval=0.0, maxval=1.0 / n))
 
-    alpha_prime = alpha
-    for it in range(1, maxiter + 1):
+    @jax.jit
+    def body_fun(carry, idx):
+        U, y, alpha_prime = carry
+
         obj, G = compute_obj_and_grad(U, y)
         Unew = project(U - alpha_prime * G)
         resid = (1 / alpha_prime) * jnp.linalg.norm(Unew - U)
+        infeas = Unew @ (Unew.T @ one) - one
 
-        if obj < compute_objective(Unew, y):
-            alpha_prime = 0.9 * alpha_prime
-        else:
-            U = Unew
-            alpha_prime = alpha_prime * 1.1
+        cand1 = (U, y, nu * alpha_prime)
+        cand2 = (Unew, y, (1.0 / nu) * alpha_prime)
+        cand3 = (Unew, y + beta * infeas, alpha_prime)
 
-        if float(resid) < tol_primal:
-            infeas = Unew @ (Unew.T @ one) - one
-            y = y + beta * infeas
+        cond1 = obj < compute_objective(Unew, y)
+        carry_tmp = tree_where(cond1, cand1, cand2)
 
-        if verbose and (it % log_every == 0):
-            infeas_now = U @ (U.T @ one) - one
-            obj = jnp.sum(C * (U @ U.T)) / n
-            logger.info(
-                f"[{it}] resid={float(resid):.3e}  "
-                f"infeas={float(jnp.linalg.norm(infeas_now)/norm_one):.3e}  "
-                f"obj={float(obj):.6e} "
-                f"alpha={float(alpha_prime):.3e}"
-            )
+        cond2 = resid > tol_primal
+        new_carry = tree_where(cond2, carry_tmp, cand3)
 
-    return U
+        return new_carry, obj
+
+    (U, y, alpha_prime), objs = jax.lax.scan(body_fun, (U, y, alpha), jnp.arange(maxiter))
+    return U.block_until_ready(), objs.block_until_ready()
 
 def sdp_subproblem(C, rank):
     """Solve the SDP subproblem."""
@@ -103,22 +102,24 @@ def solve_lrot(C, rank):
 
     P = monge(C)
     C_tilde = C @ P.T
+    logger.info("Solving SDP subproblem with Burer-Monteiro approach")
+    U, objective_values = sdp_subproblem_bm(C_tilde, rank, verbose=True)
+    
+    # only do eigendecomposition when we use SDP without BM
     #U = sdp_subproblem(C_tilde, rank)
-    U = sdp_subproblem_auglag(C_tilde, rank, verbose=True)
-    U = U @ U.T
+    # n = U.shape[0] 
+    # _, eigvecs = jnp.linalg.eigh(U - (1 / n) * jnp.ones((n, n)))
+    # top_eigvecs = eigvecs[:, -(rank-1):]
 
-    n = U.shape[0]
-    _, eigvecs = jnp.linalg.eigh(U - (1 / n) * jnp.ones((n, n)))
-    top_eigvecs = eigvecs[:, -(rank-1):]
-
-    kmeans = KMeans(n_clusters=rank, random_state=0).fit(top_eigvecs)
+    logger.info("SDP subproblem solved, proceeding with KMeans clustering")
+    kmeans = KMeans(n_clusters=rank, random_state=0).fit(U)
     labels = kmeans.labels_
 
     Q = jnp.zeros((n, rank))
     for i in range(n):
         Q = Q.at[i, labels[i]].set(1)
     R = P.T @ Q
-    return Q @ jnp.linalg.inv(Q.T @ Q), R
+    return Q @ jnp.linalg.inv(Q.T @ Q), R, objective_values
     
 def sinkhorn_rescaling(L, R, g1, g2, max_iter=100, tol=1e-4):
     rescaling_rows = True
