@@ -24,9 +24,9 @@ def monge(C):
 
 def sdp_subproblem_auglag(
     C: jnp.ndarray, K: int, *, r: int | None = None,
-    beta: float = 10.0, alpha: float = 1e-6,
-    tol: float = 1e-6, tol_primal: float = 1e-3,
-    maxiter: int = 50_000, key: jax.Array | None = None,
+    beta: float = 20.0, alpha: float = 1e-6,
+    tol: float = 1e-6, tol_primal: float = 1e-2,
+    maxiter: int = 100_000, key: jax.Array | None = None,
     verbose: bool = False, log_every: int = 1000
 ):
     n = C.shape[0]
@@ -58,7 +58,7 @@ def sdp_subproblem_auglag(
     for it in range(1, maxiter + 1):
         obj, G = compute_obj_and_grad(U, y)
         Unew = project(U - alpha_prime * G)
-        resid = (1 / alpha) * jnp.linalg.norm(Unew - U)
+        resid = (1 / alpha_prime) * jnp.linalg.norm(Unew - U)
 
         if obj < compute_objective(Unew, y):
             alpha_prime = 0.9 * alpha_prime
@@ -67,7 +67,6 @@ def sdp_subproblem_auglag(
             alpha_prime = alpha_prime * 1.1
 
         if float(resid) < tol_primal:
-            print("here")
             infeas = Unew @ (Unew.T @ one) - one
             y = y + beta * infeas
 
