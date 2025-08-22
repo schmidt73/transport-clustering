@@ -19,7 +19,7 @@ def monge(C):
         cp.sum(P, axis=1) == 1
     ]
     prob = cp.Problem((1 / n) * objective, constraints)
-    prob.solve(solver=cp.MOSEK, verbose=True)
+    prob.solve(solver=cp.CLARABEL, verbose=True)
     return P.value
 
 def tree_where(cond, a, b):
@@ -27,9 +27,9 @@ def tree_where(cond, a, b):
 
 def sdp_subproblem_bm(
     C: jnp.ndarray, K: int, *, r: int | None = None,
-    beta: float = 20.0, alpha: float = 1e-6,
+    beta: float = 20.0, alpha: float = 1e-8,
     tol: float = 1e-6, tol_primal: float = 1e-2,
-    nu : float = 0.9,  maxiter: int = 50_000, key: jax.Array | None = None,
+    nu : float = 0.9,  maxiter: int = 100_000, key: jax.Array | None = None,
     verbose: bool = False, log_every: int = 1000
 ):
     n = C.shape[0]
@@ -48,7 +48,7 @@ def sdp_subproblem_bm(
 
     def compute_objective(U, y):
         return (
-            jnp.trace((U.T @ C.T) @ U) + jnp.sum(y * (U @ (U.T @ one) - one)) 
+            jnp.sum((C @ U) * U) + jnp.sum(y * (U @ (U.T @ one) - one)) 
             + (beta / 2) * jnp.sum((U @ (U.T @ one) - one) ** 2)
         )
 
@@ -104,15 +104,16 @@ def solve_lrot(C, rank):
     C_tilde = C @ P.T
     logger.info("Solving SDP subproblem with Burer-Monteiro approach")
     U, objective_values = sdp_subproblem_bm(C_tilde, rank, verbose=True)
+    logger.info(f"SDP Relaxation Objective: {jnp.sum((C_tilde @ U) * U) / n}")
     
     # only do eigendecomposition when we use SDP without BM
     #U = sdp_subproblem(C_tilde, rank)
-    # n = U.shape[0] 
-    # _, eigvecs = jnp.linalg.eigh(U - (1 / n) * jnp.ones((n, n)))
-    # top_eigvecs = eigvecs[:, -(rank-1):]
+    n = U.shape[0] 
+    _, eigvecs = jnp.linalg.eigh(U @ U.T - (1 / n) * jnp.ones((n, n)))
+    top_eigvecs = eigvecs[:, -(rank-1):]
 
     logger.info("SDP subproblem solved, proceeding with KMeans clustering")
-    kmeans = KMeans(n_clusters=rank, random_state=0).fit(U)
+    kmeans = KMeans(n_clusters=rank, random_state=0).fit(top_eigvecs)
     labels = kmeans.labels_
 
     Q = jnp.zeros((n, rank))

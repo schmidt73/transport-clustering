@@ -26,7 +26,6 @@ sys.path.append("../src")
 import FRLC.FRLC as frlc
 import convex_lrot as clrot
 from sklearn.cluster import KMeans
-import umap
 
 def visualize_transport_matrix(P, algorithm, primal_cost, rank, show=True):
     P_np = P if isinstance(P, np.ndarray) else np.array(P)
@@ -63,7 +62,6 @@ if __name__ == "__main__":
     dtype  = torch.float64
 
     C = np.loadtxt(args.cost_matrix)
-    print(C.max())
     C = C / C.max() # normalize cost matrix
     batch_size1 = C.shape[0]
     batch_size2 = C.shape[1]
@@ -81,12 +79,14 @@ if __name__ == "__main__":
         objective_values = objective_values[1000:]
         P = Q @ R.T
         visualize_transport_matrix(P, args.algorithm, jnp.sum(C * P) / batch_size1, rank, show=False)
+        logger.info(f"Primal cost is {jnp.sum(C * P) / batch_size1}")
         fig, ax = plt.subplots()
         sns.scatterplot(x=list(range(objective_values.shape[0])), y=objective_values, 
                         ax=ax, color="orange", edgecolor=None, s=20)
         ax.set_xlabel("Iteration")
         ax.set_ylabel("Objective Value")
         fig.tight_layout()
+        plt.savefig("objective_versus_iterations.png")
         plt.show()
     elif args.algorithm == "amdlot":
         gamma = (1.0 / min(batch_size1, batch_size2))
@@ -165,6 +165,7 @@ if __name__ == "__main__":
                 "l1_total_error": l1_error,
                 "runtime": solve_time
             }
+            print(res)
 
             results.append(res)
     elif args.algorithm == "lot":
