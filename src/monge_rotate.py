@@ -1,5 +1,7 @@
 
 import numpy as np
+import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from scipy.optimize import linear_sum_assignment
 
@@ -16,15 +18,15 @@ Code for Monge Rotation on Kernelized Costs (squared Euclidean):
 
 # ----- Utilities reused (compact) -----
 def squared_euclidean_cost(X, Y):
-    X2 = np.sum(X**2, axis=1, keepdims=True)
-    Y2 = np.sum(Y**2, axis=1, keepdims=True).T
+    X2 = jnp.sum(X**2, axis=1, keepdims=True)
+    Y2 = jnp.sum(Y**2, axis=1, keepdims=True).T
     return X2 + Y2 - 2.0 * X @ Y.T
 
 def monge_permutation(C):
     row_ind, col_ind = linear_sum_assignment(C)
     n = C.shape[0]
-    P = np.zeros_like(C)
-    P[row_ind, col_ind] = 1.0
+    P = jnp.zeros_like(C)
+    P = P.at[row_ind, col_ind].set(1.0)
     return col_ind, P
 
 def symmetrize(M):
@@ -32,94 +34,86 @@ def symmetrize(M):
 
 def double_center(D):
     n = D.shape[0]
-    J = np.eye(n) - np.ones((n, n)) / n
+    J = jnp.eye(n) - jnp.ones((n, n)) / n
     return J @ D @ J
 
 def gram_from_cross_dist(S):
     Gc = -0.5 * double_center(S)
-    w, V = np.linalg.eigh((Gc + Gc.T) * 0.5)
-    w = np.clip(w, 0.0, None)
+    w, V = jnp.linalg.eigh((Gc + Gc.T) * 0.5)
+    w = jnp.clip(w, 0.0, None)
     Gc = -0.5 * double_center(S)
     return (V * w) @ V.T
 
 def embed_from_gram(G, tol=1e-12):
-    w, V = np.linalg.eigh((G + G.T) * 0.5)
+    w, V = jnp.linalg.eigh((G + G.T) * 0.5)
     keep = w > tol
-    if not np.any(keep):
-        return np.zeros((G.shape[0], 1))
-    return V[:, keep] * np.sqrt(w[keep])
+    if not jnp.any(keep):
+        return jnp.zeros((G.shape[0], 1))
+    return V[:, keep] * jnp.sqrt(w[keep])
 
 def _kmeanspp_init(X, k, rng):
     n = X.shape[0]
-    centers = np.empty((k, X.shape[1]), dtype=X.dtype)
+    centers = jnp.empty((k, X.shape[1]), dtype=X.dtype)
     i0 = rng.integers(n)
-    centers[0] = X[i0]
-    d2 = np.sum((X - centers[0])**2, axis=1)
+    centers = centers.at[0].set(X[i0])
+    d2 = jnp.sum((X - centers[0])**2, axis=1)
     for t in range(1, k):
         s = d2.sum()
         probs = d2/s if s > 0 else np.ones(n)/n
         it = rng.choice(n, p=probs)
-        centers[t] = X[it]
-        d2 = np.minimum(d2, np.sum((X - centers[t])**2, axis=1))
+        centers = centers.at[t].set(X[it])
+        d2 = jnp.minimum(d2, jnp.sum((X - centers[t])**2, axis=1))
     return centers
 
-def _lloyds_kmeans(X, k, max_iter=100, tol=1e-6, random_state=0):
+def _lloyds_kmeans(X, k, max_iter=250, tol=1e-6, random_state=0):
     rng = np.random.default_rng(random_state)
     centers = _kmeanspp_init(X, k, rng)
     for _ in range(max_iter):
-        d2 = np.sum((X[:, None, :] - centers[None, :, :])**2, axis=2)
-        labels = np.argmin(d2, axis=1)
-        new_centers = np.zeros_like(centers)
+        d2 = jnp.sum((X[:, None, :] - centers[None, :, :])**2, axis=2)
+        labels = jnp.argmin(d2, axis=1)
+        new_centers = jnp.zeros_like(centers)
         for j in range(k):
             pts = X[labels == j]
             if len(pts) == 0:
-                new_centers[j] = X[rng.integers(X.shape[0])]
+                new_centers = new_centers.at[j].set(X[rng.integers(X.shape[0])])
             else:
-                new_centers[j] = pts.mean(axis=0)
-        if np.linalg.norm(new_centers - centers) <= tol:
+                new_centers = new_centers.at[j].set(pts.mean(axis=0))
+        if jnp.linalg.norm(new_centers - centers) <= tol:
             centers = new_centers
             break
         centers = new_centers
-    d2 = np.sum((X[:, None, :] - centers[None, :, :])**2, axis=2)
-    labels = np.argmin(d2, axis=1)
+    d2 = jnp.sum((X[:, None, :] - centers[None, :, :])**2, axis=2)
+    labels = jnp.argmin(d2, axis=1)
     return labels, centers
 
-def monge_rotation_kmeans(X, Y, r, random_state=0):
-    # Cost and Monge
-    C = squared_euclidean_cost(X, Y)
+def monge_rotation_kmeans(C, r, random_state=0):
     perm, P = monge_permutation(C)
-    # Rotate and symmetrize
     Ctilde = C @ P.T
     S = Ctilde + Ctilde.T
-    # Gram and embed
-    G = gram_from_cross_dist(S)
-    # Returning our embedded points from the Gram matrix
-    Z = embed_from_gram(G)
-    # k-means on Z
+    G = gram_from_cross_dist(S) # Gram and embed
+    Z = embed_from_gram(G) # Returning our embedded points from the Gram matrix
     labels, centers = _lloyds_kmeans(Z, r, random_state=random_state)
-    # "Hard" Q with row-sum 1/n
-    n = X.shape[0]
-    Q_onehot = np.zeros((n, r))
-    Q_onehot[np.arange(n), labels] = 1.0
-    Q = Q_onehot / n
+    n = C.shape[0]
+    Q = jnp.zeros((n, r))
+    Q = Q.at[jnp.arange(n), labels].set(1.0)
     R = P.T @ Q
-    return Q, R, labels, perm
+    return Q @ jnp.linalg.inv(Q.T @ Q), R, labels, perm
 
 def plot_coclusters(X, Y, Q, R, title_suffix=""):
     # Argmax labels
-    labels_X = np.argmax(Q, axis=1)
-    labels_Y = np.argmax(R, axis=1)
+    labels_X = jnp.argmax(Q, axis=1)
+    labels_Y = jnp.argmax(R, axis=1)
 
     # Plot X with labels_X
     plt.figure()
-    for k in np.unique(labels_X):
+    for k in jnp.unique(labels_X):
         pts = X[labels_X == k]
         plt.scatter(pts[:,0], pts[:,1], label=f"cluster {int(k)}", s=18)
     plt.xlabel("x1")
     plt.ylabel("x2")
     plt.title(f"X clusters via argmax(Q){title_suffix}")
-    
-    for k in np.unique(labels_Y):
+
+    for k in jnp.unique(labels_Y):
         pts = Y[labels_Y == k]
         plt.scatter(pts[:,0], pts[:,1], label=f"cluster {int(k)}", s=18)
     plt.xlabel("y1")
