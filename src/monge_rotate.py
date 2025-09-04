@@ -40,6 +40,7 @@ def double_center(D):
 def gram_from_cross_dist(S):
     Gc = -0.5 * double_center(S)
     w, V = jnp.linalg.eigh((Gc + Gc.T) * 0.5)
+    print(w)
     w = jnp.clip(w, 0.0, None)
     Gc = -0.5 * double_center(S)
     return (V * w) @ V.T
