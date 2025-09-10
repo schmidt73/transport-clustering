@@ -4,6 +4,7 @@ import random
 import torch
 import torchdyn
 import jax
+
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
@@ -16,17 +17,35 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from ott.initializers.linear.initializers_lr import RandomInitializer, KMeansInitializer, Rank2Initializer
-from ott.geometry.geometry import Geometry
+from ott.geometry.pointcloud import PointCloud
 from ott.problems.linear import linear_problem
-from ott.solvers.linear import sinkhorn, sinkhorn_lr
+from ott.solvers.linear import sinkhorn_lr
 from loguru import logger
 
 sys.path.append("../src")
 
 import monge_rotate as mr
 import FRLC.FRLC as frlc
-import convex_lrot as clrot
-from sklearn.cluster import KMeans
+
+def sinkhorn_rescaling(P, g1, g2, max_iter=100, tol=1e-4):
+    rescaling_rows = True
+    for _ in range(max_iter):
+        if rescaling_rows:
+            row_sum = P @ jnp.ones(P.shape[1])
+            rescaling_matrix = jnp.diag(g1 / row_sum)
+            P = rescaling_matrix @ P
+            rescaling_rows = False
+        else:
+            col_sum = P.T @ jnp.ones(P.shape[0])
+            rescaling_matrix = jnp.diag(g2 / col_sum)
+            P = P @ rescaling_matrix
+            rescaling_rows = True
+
+        norm1 = jnp.sum(jnp.abs(P @ jnp.ones(P.shape[1]) - g1))
+        norm2 = jnp.sum(jnp.abs(P.T @ jnp.ones(P.shape[0]) - g2))
+        if norm1 < tol and norm2 < tol:
+            break
+    return P
 
 def visualize_transport_matrix(P, algorithm, primal_cost, rank, show=True):
     P_np = P if isinstance(P, np.ndarray) else np.array(P)
@@ -47,7 +66,7 @@ def parse_args():
     parser.add_argument("-r", "--rank", type=int, default=5)
     parser.add_argument("-s", "--seed", type=int, default=0)
     parser.add_argument("-o", "--output", type=str, default="results")
-    parser.add_argument("-a", "--algorithm", default="clrot", choices=["clrot", "mr", "frlc", "lot", "monge"])
+    parser.add_argument("-a", "--algorithm", default="clrot", choices=["mr", "frlc", "lot"])
     parser.add_argument("--restarts", type=int, default=10)
     parser.add_argument("--visualize", action="store_true", help="Visualize transport matrix.")
     return parser.parse_args()
@@ -55,7 +74,6 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    # set random seed for reproducibility
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -66,10 +84,10 @@ if __name__ == "__main__":
     X = np.loadtxt(args.x_points)
     Y = np.loadtxt(args.y_points)
 
-    C = np.linalg.norm(X[:, None, :] - Y[None, :, :], axis=2)**2 # squared Euclidean cost
-    C = C / C.max() # normalize cost matrix
-    batch_size1 = C.shape[0]
-    batch_size2 = C.shape[1]
+    # C = np.linalg.norm(X[:, None, :] - Y[None, :, :], axis=2)**2
+    # C = C / C.max()
+    batch_size1 = X.shape[0]
+    batch_size2 = Y.shape[0]
 
     g1 = np.ones((batch_size1)) / batch_size1
     g2 = np.ones((batch_size2)) / batch_size2
@@ -77,23 +95,7 @@ if __name__ == "__main__":
     rank = args.rank
 
     results = []
-    if args.algorithm == "clrot":
-        gamma = (1.0 / min(batch_size1, batch_size2))
-        C = jnp.array(C)
-        Q, R, objective_values = clrot.solve_lrot(C, rank)
-        objective_values = objective_values[1000:]
-        P = Q @ R.T
-        visualize_transport_matrix(P, args.algorithm, jnp.sum(C * P) / batch_size1, rank, show=False)
-        logger.info(f"Primal cost is {jnp.sum(C * P) / batch_size1}")
-        fig, ax = plt.subplots()
-        sns.scatterplot(x=list(range(objective_values.shape[0])), y=objective_values, 
-                        ax=ax, color="orange", edgecolor=None, s=20)
-        ax.set_xlabel("Iteration")
-        ax.set_ylabel("Objective Value")
-        fig.tight_layout()
-        plt.savefig("objective_versus_iterations.png")
-        plt.show()
-    elif args.algorithm == "mr":
+    if args.algorithm == "mr":
         C = jnp.array(C)
         Q, R, _, _ = mr.monge_rotation_kmeans(C, X, Y, rank)
         P = Q @ R.T
@@ -111,7 +113,7 @@ if __name__ == "__main__":
             solve_time = end_time - start_time
 
             P = P.cpu().numpy()
-            P = clrot.sinkhorn_rescaling_P(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
+            P = sinkhorn_rescaling(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
             np.savetxt("P.txt", P, fmt="%.8f")
 
             primal_cost = np.sum(C.cpu().numpy() * P)
@@ -140,7 +142,7 @@ if __name__ == "__main__":
 
             results.append(res)
     elif args.algorithm == "lot":
-        geom = Geometry(cost_matrix=C)
+        geom = PointCloud(x=X, y=Y, epsilon=0.001, scale_cost="max_cost")
 
         ot_prob = linear_problem.LinearProblem(geom, g1, g2)
         start_time = time.time()
@@ -150,9 +152,9 @@ if __name__ == "__main__":
         ot_lr = solver(ot_prob)
 
         P = ot_lr.matrix
-        P = clrot.sinkhorn_rescaling_P(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
+        P = sinkhorn_rescaling(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
         
-        primal_cost  = jnp.sum(C * P)
+        primal_cost = ot_lr.primal_cost
 
         if args.visualize:
             visualize_transport_matrix(P, args.algorithm, primal_cost, rank)   
@@ -176,23 +178,6 @@ if __name__ == "__main__":
 
         print(res)
         results.append(res)
-    elif args.algorithm == "monge":
-        geom = Geometry(cost_matrix=C, epsilon=0.0001)
-
-        ot_prob = linear_problem.LinearProblem(geom, g1, g2)
-        start_time = time.time()
-        solver = sinkhorn.Sinkhorn()
-        end_time = time.time()
-        solve_time = end_time - start_time
-        ot_result = solver(ot_prob)
-
-        P = ot_result.matrix
-        np.savetxt("P.txt", P, fmt="%.8f")
-
-        primal_cost = np.sum(C * P)
-
-        if args.visualize:
-            visualize_transport_matrix(P, args.algorithm, primal_cost, rank)   
 
     results = pd.DataFrame(results)
     results.to_csv(f"{args.output}", index=False)

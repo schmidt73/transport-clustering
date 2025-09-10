@@ -93,8 +93,8 @@ def monge_rotation_kmeans(C, X, Y, r, random_state=0):
 
     Ctilde = C @ P.T
     S = Ctilde + Ctilde.T
-    G = gram_from_cross_dist(S) # Gram and embed
-    Z = embed_from_gram(G) # Returning our embedded points from the Gram matrix
+    G = gram_from_cross_dist(S)
+    Z = embed_from_gram(G)
     labels, centers = _lloyds_kmeans(Z, r, random_state=random_state)
     n = C.shape[0]
     Q1 = jnp.zeros((n, r))
