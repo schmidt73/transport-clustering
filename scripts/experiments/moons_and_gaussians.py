@@ -69,4 +69,6 @@ if __name__ == "__main__":
     if args.output is None:
         np.savetxt(sys.stdout, C, fmt='%.4f')
     else:
-        np.savetxt(args.output, C, fmt='%.4f')
+        np.savetxt(args.output + "_cost_matrix.txt", C, fmt='%.4f')
+        np.savetxt(args.output + "_X_matrix.txt", x0)
+        np.savetxt(args.output + "_Y_matrix.txt", x1)

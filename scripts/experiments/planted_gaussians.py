@@ -120,6 +120,12 @@ def main() -> None:
         np.savetxt(args.out + "_optimal_plan.txt", P, fmt="%.6f")
         print(f"Optimal plan saved to {args.out}_optimal_plan.txt (shape {P.shape})", file=sys.stderr)
 
+        np.savetxt(args.out + "_X.txt", X, fmt="%.6f")
+        print(f"X samples saved to {args.out}_X.txt (shape {X.shape})", file=sys.stderr)    
+
+        np.savetxt(args.out + "_Y.txt", Y, fmt="%.6f")
+        print(f"Y samples saved to {args.out}_Y.txt (shape {Y.shape})", file=sys.stderr)
+
         metadata = {
             "k": k,
             "sigma": args.sigma,

@@ -40,7 +40,6 @@ def double_center(D):
 def gram_from_cross_dist(S):
     Gc = -0.5 * double_center(S)
     w, V = jnp.linalg.eigh((Gc + Gc.T) * 0.5)
-    print(w)
     w = jnp.clip(w, 0.0, None)
     Gc = -0.5 * double_center(S)
     return (V * w) @ V.T
@@ -87,18 +86,34 @@ def _lloyds_kmeans(X, k, max_iter=250, tol=1e-6, random_state=0):
     labels = jnp.argmin(d2, axis=1)
     return labels, centers
 
-def monge_rotation_kmeans(C, r, random_state=0):
+def monge_rotation_kmeans(C, X, Y, r, random_state=0):
     perm, P = monge_permutation(C)
+    labels_X, centers_X = _lloyds_kmeans(X, r, random_state=random_state)
+    labels_Y, centers_Y = _lloyds_kmeans(Y, r, random_state=random_state)
+
     Ctilde = C @ P.T
     S = Ctilde + Ctilde.T
     G = gram_from_cross_dist(S) # Gram and embed
     Z = embed_from_gram(G) # Returning our embedded points from the Gram matrix
     labels, centers = _lloyds_kmeans(Z, r, random_state=random_state)
     n = C.shape[0]
-    Q = jnp.zeros((n, r))
-    Q = Q.at[jnp.arange(n), labels].set(1.0)
-    R = P.T @ Q
-    return Q @ jnp.linalg.inv(Q.T @ Q), R, labels, perm
+    Q1 = jnp.zeros((n, r))
+    Q1 = Q1.at[jnp.arange(n), labels].set(1.0)
+    R1 = P.T @ Q1
+
+    Q2 = jnp.zeros((n, r))
+    Q2 = Q2.at[jnp.arange(n), labels_X].set(1.0)
+    R2 = P.T @ Q2
+
+    R3 = jnp.zeros((n, r))
+    R3 = R3.at[jnp.arange(n), labels_Y].set(1.0)
+    Q3 = P @ R3
+
+    P1 = Q1 @ jnp.linalg.inv(Q1.T @ Q1) @ R1.T
+    P2 = Q2 @ jnp.linalg.inv(Q2.T @ Q2) @ R2.T
+    P3 = Q3 @ jnp.linalg.inv(Q3.T @ Q3) @ R3.T
+    print(f"Cost 1: {jnp.sum(C * P1) / n}, Cost 2: {jnp.sum(C * P2) / n}, Cost 3: {jnp.sum(C * P3) / n}")
+    return Q1 @ jnp.linalg.inv(Q1.T @ Q1), R1, labels, perm
 
 def plot_coclusters(X, Y, Q, R, title_suffix=""):
     # Argmax labels

@@ -42,7 +42,8 @@ def visualize_transport_matrix(P, algorithm, primal_cost, rank, show=True):
 
 def parse_args():
     parser = ap.ArgumentParser()
-    parser.add_argument("cost_matrix", help="Cost matrix.")
+    parser.add_argument("x_points", help="X points.")
+    parser.add_argument("y_points", help="Y points.")
     parser.add_argument("-r", "--rank", type=int, default=5)
     parser.add_argument("-s", "--seed", type=int, default=0)
     parser.add_argument("-o", "--output", type=str, default="results")
@@ -62,7 +63,10 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype  = torch.float64
 
-    C = np.loadtxt(args.cost_matrix)
+    X = np.loadtxt(args.x_points)
+    Y = np.loadtxt(args.y_points)
+
+    C = np.linalg.norm(X[:, None, :] - Y[None, :, :], axis=2)**2 # squared Euclidean cost
     C = C / C.max() # normalize cost matrix
     batch_size1 = C.shape[0]
     batch_size2 = C.shape[1]
@@ -91,7 +95,7 @@ if __name__ == "__main__":
         plt.show()
     elif args.algorithm == "mr":
         C = jnp.array(C)
-        Q, R, _, _ = mr.monge_rotation_kmeans(C, rank)
+        Q, R, _, _ = mr.monge_rotation_kmeans(C, X, Y, rank)
         P = Q @ R.T
         visualize_transport_matrix(P, args.algorithm, jnp.sum(C * P) / batch_size1, rank, show=False)
         logger.info(f"Primal cost is {jnp.sum(C * P) / batch_size1}")
