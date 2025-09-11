@@ -3,6 +3,8 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import gurobipy as gp
+from gurobipy import GRB
 from scipy.optimize import linear_sum_assignment
 
 '''
@@ -23,11 +25,32 @@ def squared_euclidean_cost(X, Y):
     return X2 + Y2 - 2.0 * X @ Y.T
 
 def monge_permutation(C):
-    row_ind, col_ind = linear_sum_assignment(C)
     n = C.shape[0]
-    P = jnp.zeros_like(C)
-    P = P.at[row_ind, col_ind].set(1.0)
-    return col_ind, P
+    model = gp.Model("monge_permutation")
+    model.setParam('OutputFlag', 0)
+    
+    x = model.addMVar((n, n), vtype=GRB.BINARY, name="x")
+    
+    obj = gp.quicksum(C[i, j] * x[i, j] for i in range(n) for j in range(n))
+    model.setObjective(obj, GRB.MINIMIZE)
+   
+    for i in range(n):
+        model.addConstr(gp.quicksum(x[i, j] for j in range(n)) == 1)    
+    for j in range(n):
+        model.addConstr(gp.quicksum(x[i, j] for i in range(n)) == 1)
+    
+    model.optimize()
+    
+    P = np.zeros((n, n))
+    col_ind = np.zeros(n, dtype=int)
+    
+    for i in range(n):
+        for j in range(n):
+            if x[i, j].X > 0.5:
+                P[i, j] = 1.0
+                col_ind[i] = j
+    
+    return col_ind, jnp.array(P)
 
 def symmetrize(M):
     return 0.5 * (M + M.T)

@@ -29,6 +29,17 @@ sys.path.append("../src")
 import monge_rotate as mr
 import FRLC.FRLC as frlc
 
+def compute_sqeuc_cost_matrix(X, Y, *, dtype=jnp.float32, normalize=True):
+    x2 = jnp.sum(X * X, axis=1)
+    y2 = jnp.sum(Y * Y, axis=1)
+    G  = X @ Y.T
+    D  = x2[:, None] + y2[None, :] - 2.0 * G
+    D  = jnp.maximum(D, 0)
+
+    if normalize:
+        D = D / jnp.maximum(jnp.max(D), jnp.finfo(D.dtype).tiny)
+    return D
+
 def sinkhorn_rescaling(P, g1, g2, max_iter=100, tol=1e-4):
     rescaling_rows = True
     for _ in range(max_iter):
@@ -83,11 +94,14 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype  = torch.float64
 
-    X = np.loadtxt(args.x_points)
-    Y = np.loadtxt(args.y_points)
+    X = jnp.array(np.loadtxt(args.x_points))
+    Y = jnp.array(np.loadtxt(args.y_points))
 
-    # C = np.linalg.norm(X[:, None, :] - Y[None, :, :], axis=2)**2
-    # C = C / C.max()
+    logger.info(f"Computing cost matrix for {X.shape[0]} x {Y.shape[0]} points")
+    C = compute_sqeuc_cost_matrix(X, Y, dtype=dtype, normalize=True)
+    C = np.array(C)
+    logger.info("Cost matrix computed.")
+
     batch_size1 = X.shape[0]
     batch_size2 = Y.shape[0]
 
