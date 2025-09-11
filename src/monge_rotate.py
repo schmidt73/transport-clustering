@@ -3,9 +3,13 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
-import gurobipy as gp
-from gurobipy import GRB
-from scipy.optimize import linear_sum_assignment
+
+import ott
+
+from ott.geometry import geometry
+from ott.problems.linear import linear_problem
+from ott.solvers.linear import sinkhorn
+from loguru import logger
 
 '''
 Code for Monge Rotation on Kernelized Costs (squared Euclidean):
@@ -18,39 +22,27 @@ Code for Monge Rotation on Kernelized Costs (squared Euclidean):
         6. Yield Q from K-means, R = P.T @ Q
 '''
 
-# ----- Utilities reused (compact) -----
 def squared_euclidean_cost(X, Y):
     X2 = jnp.sum(X**2, axis=1, keepdims=True)
     Y2 = jnp.sum(Y**2, axis=1, keepdims=True).T
     return X2 + Y2 - 2.0 * X @ Y.T
 
 def monge_permutation(C):
+    """
+    Approximately computes the Monge permutation and 
+    transport matrix from cost matrix C.
+    """
     n = C.shape[0]
-    model = gp.Model("monge_permutation")
-    model.setParam('OutputFlag', 0)
     
-    x = model.addMVar((n, n), vtype=GRB.BINARY, name="x")
-    
-    obj = gp.quicksum(C[i, j] * x[i, j] for i in range(n) for j in range(n))
-    model.setObjective(obj, GRB.MINIMIZE)
-   
-    for i in range(n):
-        model.addConstr(gp.quicksum(x[i, j] for j in range(n)) == 1)    
-    for j in range(n):
-        model.addConstr(gp.quicksum(x[i, j] for i in range(n)) == 1)
-    
-    model.optimize()
-    
-    P = np.zeros((n, n))
-    col_ind = np.zeros(n, dtype=int)
-    
-    for i in range(n):
-        for j in range(n):
-            if x[i, j].X > 0.5:
-                P[i, j] = 1.0
-                col_ind[i] = j
-    
-    return col_ind, jnp.array(P)
+    a = jnp.ones(n) / n
+    b = jnp.ones(n) / n
+
+    geom = geometry.Geometry(cost_matrix=C, epsilon=1e-3)
+    problem = linear_problem.LinearProblem(geom, a=a, b=b)
+    solver = sinkhorn.Sinkhorn()
+    solution = solver(problem)
+    P_soft = solution.matrix
+    return P_soft
 
 def symmetrize(M):
     return 0.5 * (M + M.T)
@@ -110,7 +102,8 @@ def _lloyds_kmeans(X, k, max_iter=250, tol=1e-6, random_state=0):
     return labels, centers
 
 def monge_rotation_kmeans(C, X, Y, r, random_state=0):
-    perm, P = monge_permutation(C)
+    P = monge_permutation(C)
+    logger.info("Computed Monge permutation")
     labels_X, centers_X = _lloyds_kmeans(X, r, random_state=random_state)
     labels_Y, centers_Y = _lloyds_kmeans(Y, r, random_state=random_state)
 
@@ -136,7 +129,7 @@ def monge_rotation_kmeans(C, X, Y, r, random_state=0):
     P2 = Q2 @ jnp.linalg.inv(Q2.T @ Q2) @ R2.T
     P3 = Q3 @ jnp.linalg.inv(Q3.T @ Q3) @ R3.T
     print(f"Cost 1: {jnp.sum(C * P1) / n}, Cost 2: {jnp.sum(C * P2) / n}, Cost 3: {jnp.sum(C * P3) / n}")
-    return Q1 @ jnp.linalg.inv(Q1.T @ Q1), R1, labels, perm
+    return Q1 @ jnp.linalg.inv(Q1.T @ Q1), R1, labels
 
 def plot_coclusters(X, Y, Q, R, title_suffix=""):
     # Argmax labels

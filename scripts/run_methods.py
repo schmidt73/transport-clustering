@@ -113,10 +113,10 @@ if __name__ == "__main__":
     results = []
     if args.algorithm == "mr":
         C = jnp.array(C)
-        Q, R, _, _ = mr.monge_rotation_kmeans(C, X, Y, rank)
+        Q, R, _ = mr.monge_rotation_kmeans(C, X, Y, rank)
         P = Q @ R.T
-        visualize_transport_matrix(P, args.algorithm, jnp.sum(C * P) / batch_size1, rank, show=False)
-        logger.info(f"Primal cost is {jnp.sum(C * P) / batch_size1}")
+        visualize_transport_matrix(P, args.algorithm, jnp.sum(C * P), rank, show=False)
+        logger.info(f"Primal cost is {jnp.sum(C * P)}")
         plt.show()
     elif args.algorithm == "frlc":
         C = torch.from_numpy(C).to(device)

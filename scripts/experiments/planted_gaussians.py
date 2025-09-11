@@ -78,11 +78,10 @@ def main() -> None:
     else:
         base = args.n_total // k
         counts = np.full(k, base, dtype=int)
-        counts[-1] += args.n_total - base * k   # add remainder to last cluster
+        counts[-1] += args.n_total - base * k
 
-    means = regular_simplex(k)                 # shape (k, k−1)
+    means = regular_simplex(k)
 
-    # First mixture: X
     X, labels_X = sample_mixture(means, counts, args.sigma, rng)
 
     # Perturb means (isotropic Gaussian noise, τ = perturb_scale)
