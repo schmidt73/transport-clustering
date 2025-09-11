@@ -5,7 +5,6 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 
 import ott
-
 from ott.geometry import geometry
 from ott.problems.linear import linear_problem
 from ott.solvers.linear import sinkhorn
@@ -44,28 +43,6 @@ def monge_permutation(C):
     P_soft = solution.matrix
     return P_soft
 
-def symmetrize(M):
-    return 0.5 * (M + M.T)
-
-def double_center(D):
-    n = D.shape[0]
-    J = jnp.eye(n) - jnp.ones((n, n)) / n
-    return J @ D @ J
-
-def gram_from_cross_dist(S):
-    Gc = -0.5 * double_center(S)
-    w, V = jnp.linalg.eigh((Gc + Gc.T) * 0.5)
-    w = jnp.clip(w, 0.0, None)
-    Gc = -0.5 * double_center(S)
-    return (V * w) @ V.T
-
-def embed_from_gram(G, tol=1e-12):
-    w, V = jnp.linalg.eigh((G + G.T) * 0.5)
-    keep = w > tol
-    if not jnp.any(keep):
-        return jnp.zeros((G.shape[0], 1))
-    return V[:, keep] * jnp.sqrt(w[keep])
-
 def _kmeanspp_init(X, k, rng):
     n = X.shape[0]
     centers = jnp.empty((k, X.shape[1]), dtype=X.dtype)
@@ -103,33 +80,24 @@ def _lloyds_kmeans(X, k, max_iter=250, tol=1e-6, random_state=0):
 
 def monge_rotation_kmeans(C, X, Y, r, random_state=0):
     P = monge_permutation(C)
-    logger.info("Computed Monge permutation")
+    logger.info("Computed Monge permutation, performing k-means initialization...")
     labels_X, centers_X = _lloyds_kmeans(X, r, random_state=random_state)
     labels_Y, centers_Y = _lloyds_kmeans(Y, r, random_state=random_state)
 
-    Ctilde = C @ P.T
-    S = Ctilde + Ctilde.T
-    G = gram_from_cross_dist(S)
-    Z = embed_from_gram(G)
-    labels, centers = _lloyds_kmeans(Z, r, random_state=random_state)
-    n = C.shape[0]
+    n = X.shape[0]
     Q1 = jnp.zeros((n, r))
-    Q1 = Q1.at[jnp.arange(n), labels].set(1.0)
+    Q1 = Q1.at[jnp.arange(n), labels_X].set(1.0)
     R1 = P.T @ Q1
 
-    Q2 = jnp.zeros((n, r))
-    Q2 = Q2.at[jnp.arange(n), labels_X].set(1.0)
-    R2 = P.T @ Q2
+    R2 = jnp.zeros((n, r))
+    R2 = R2.at[jnp.arange(n), labels_Y].set(1.0)
+    Q2 = P @ R2
 
-    R3 = jnp.zeros((n, r))
-    R3 = R3.at[jnp.arange(n), labels_Y].set(1.0)
-    Q3 = P @ R3
+    cost1 = jnp.sum(C * (Q1 @ jnp.diag(1 / (Q1.T @ jnp.ones(n))) @ R1.T))
+    cost2 = jnp.sum(C * (Q2 @ jnp.diag(1 / (R2.T @ jnp.ones(n))) @ R2.T))
 
-    P1 = Q1 @ jnp.linalg.inv(Q1.T @ Q1) @ R1.T
-    P2 = Q2 @ jnp.linalg.inv(Q2.T @ Q2) @ R2.T
-    P3 = Q3 @ jnp.linalg.inv(Q3.T @ Q3) @ R3.T
-    print(f"Cost 1: {jnp.sum(C * P1) / n}, Cost 2: {jnp.sum(C * P2) / n}, Cost 3: {jnp.sum(C * P3) / n}")
-    return Q1 @ jnp.linalg.inv(Q1.T @ Q1), R1, labels
+    logger.info(f"Cost 1: {cost1}, Cost 2: {cost2}")
+    return Q1 @ jnp.linalg.inv(Q1.T @ Q1), R1
 
 def plot_coclusters(X, Y, Q, R, title_suffix=""):
     # Argmax labels
