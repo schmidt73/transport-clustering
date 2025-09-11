@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Construct two Gaussian mixtures with k means, then build the pair-wise
 Euclidean-distance (cost) matrix between their samples.
@@ -95,31 +94,26 @@ def main() -> None:
         labels_Y.append(labels_X[idx])
     Y = np.array(Y)
     labels_Y = np.array(labels_Y)
-    print(Y - X)
-    # Cost matrix: pairwise Euclidean distances
-    # Broadcasting: X (n, d) -> (n, 1, d), Y (m, d) -> (1, m, d)
-    diff = X[:, None, :] - Y[None, :, :]
-    C = np.linalg.norm(diff, axis=2) ** 2
 
-    print(labels_X)
-    print(labels_Y)
-    P = np.zeros_like(C)
-    for i, label_i in enumerate(labels_X):
-        for j, label_j in enumerate(labels_Y):
-            if label_i == label_j:
-                P[i, j] = 1.0
-                P[j, i] = 1.0
+    label_to_Y = {i: [] for i in range(k)}
+    label_to_X = {i: [] for i in range(k)}  
+    for i in range(len(labels_X)):
+        label_to_X[labels_X[i]].append(i)
+        label_to_Y[labels_Y[i]].append(i)
 
-    P = P / P.sum()
-    # --- Output ----------------------------------------------------------------
+    total_cost = 0
+    max_cost = 0
+    P_sum = 0
+    for i in range(k):
+        for idx1 in label_to_X[i]:
+            for idx2 in label_to_Y[i]:
+                cost = np.linalg.norm(X[idx1, :] - Y[idx2, :]) ** 2
+                total_cost += cost
+                max_cost = max(max_cost, cost)
+                P_sum += 1.0
+    total_cost = total_cost / P_sum
     
     if args.out:
-        np.savetxt(args.out + "_cost_matrix.txt", C,  fmt="%.6f")
-        print(f"Cost matrix saved to {args.out}_cost_matrix.txt (shape {C.shape})", file=sys.stderr)
-
-        np.savetxt(args.out + "_optimal_plan.txt", P, fmt="%.6f")
-        print(f"Optimal plan saved to {args.out}_optimal_plan.txt (shape {P.shape})", file=sys.stderr)
-
         np.savetxt(args.out + "_X.txt", X, fmt="%.6f")
         print(f"X samples saved to {args.out}_X.txt (shape {X.shape})", file=sys.stderr)    
 
@@ -132,7 +126,7 @@ def main() -> None:
             "perturb_scale": args.perturb_scale,
             "counts": counts.tolist(),
             "seed": args.seed,
-            "cost": np.sum((C / C.max()) * P)
+            "cost": total_cost
         }
 
         with open(args.out + "_metadata.json", "w") as f:

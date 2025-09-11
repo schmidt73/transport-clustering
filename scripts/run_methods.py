@@ -6,6 +6,8 @@ import torchdyn
 import jax
 
 jax.config.update("jax_enable_x64", True)
+print(jax.devices())
+print(jax.default_backend())
 
 import jax.numpy as jnp
 import time
