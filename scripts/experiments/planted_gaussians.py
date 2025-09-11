@@ -16,6 +16,16 @@ import argparse
 import sys
 from pathlib import Path
 import numpy as np
+import jax
+import jax.numpy as jnp
+
+def compute_sqeuc_cost_matrix_max(X, Y, *, dtype=jnp.float32):
+    x2 = jnp.sum(X * X, axis=1)
+    y2 = jnp.sum(Y * Y, axis=1)
+    G  = X @ Y.T
+    D  = x2[:, None] + y2[None, :] - 2.0 * G
+    D  = jnp.maximum(D, 0)
+    return jnp.maximum(jnp.max(D), jnp.finfo(D.dtype).tiny)
 
 def regular_simplex(k: int) -> np.ndarray:
     """
@@ -32,7 +42,6 @@ def regular_simplex(k: int) -> np.ndarray:
     scale = np.sqrt(k / (2.0 * (k - 1)))
     verts *= scale
     return verts[:, :-1]                # drop final coord → ℝ^{k−1}
-
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -100,18 +109,17 @@ def main() -> None:
         label_to_X[labels_X[i]].append(i)
         label_to_Y[labels_Y[i]].append(i)
 
+    max_cost = compute_sqeuc_cost_matrix_max(jnp.array(X), jnp.array(Y))
     total_cost = 0
-    max_cost = 0
     P_sum = 0
     for i in range(k):
         for idx1 in label_to_X[i]:
             for idx2 in label_to_Y[i]:
                 cost = np.linalg.norm(X[idx1, :] - Y[idx2, :]) ** 2
                 total_cost += cost
-                max_cost = max(max_cost, cost)
                 P_sum += 1.0
-    total_cost = total_cost / P_sum
-    
+    total_cost = float(total_cost / (P_sum * max_cost))
+
     if args.out:
         np.savetxt(args.out + "_X.txt", X, fmt="%.6f")
         print(f"X samples saved to {args.out}_X.txt (shape {X.shape})", file=sys.stderr)    
