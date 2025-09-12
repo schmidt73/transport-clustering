@@ -46,7 +46,7 @@ def low_rank_distance_factorization_jax(
     X2: jnp.ndarray,
     r: int,
     eps: float,
-    key: jax.random.KeyArray,
+    key: jnp.ndarray,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """
     JAX version of low_rank_distance_factorization.
