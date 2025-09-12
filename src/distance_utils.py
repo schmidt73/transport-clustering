@@ -15,41 +15,31 @@ def _cdist(X: jnp.ndarray, Y: jnp.ndarray) -> jnp.ndarray:
     # (n,1,d) - (1,m,d) -> (n,m,d) -> sum over d -> (n,m) -> sqrt
     return jnp.sqrt(jnp.sum((X[:, None, :] - Y[None, :, :]) ** 2, axis=-1))
 
-def compute_lr_sqeuclidean_matrix_jax(
-    X_s: jnp.ndarray,
-    X_t: jnp.ndarray,
-    rescale_cost: bool,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+def compute_lr_sqeuclidean_factors(X_s: jnp.ndarray,
+                                   X_t: jnp.ndarray,
+                                   rescale_cost: bool = False):
     """
-    JAX version of compute_lr_sqeuclidean_matrix.
-    
-    Adapted from "Section 3.5, proposition 1" in Scetbon, Cuturi, Peyré (2021).
-    Computes a low-rank factorization (M1, M2^T) of a squared Euclidean distance matrix.
+    Returns (A, B) such that C ≈ A @ B.T for squared Euclidean cost.
+    A = [||x||^2, 1, -2x],  B = [1, ||y||^2, y]
+    Shapes: A: (n, d+2), B: (m, d+2)
     """
-    ns, dim = X_s.shape
+    ns, d = X_s.shape
     nt, _ = X_t.shape
-
-    # First low rank decomposition of the cost matrix (M1)
-    sum_Xs_sq = jnp.sum(X_s**2, axis=1, keepdims=True)  # (ns, 1)
-    ones_ns = jnp.ones((ns, 1), dtype=X_s.dtype)        # (ns, 1)
-    neg_two_Xs = -2.0 * X_s                              # (ns, dim)
-    M1 = jnp.concatenate((sum_Xs_sq, ones_ns, neg_two_Xs), axis=1)  # (ns, dim+2)
-
-    # Second low rank decomposition of the cost matrix (M2)
-    ones_nt = jnp.ones((nt, 1), dtype=X_t.dtype)        # (nt, 1)
-    sum_Xt_sq = jnp.sum(X_t**2, axis=1, keepdims=True)  # (nt, 1)
-    Xt = X_t                                            # (nt, dim)
-    M2 = jnp.concatenate((ones_nt, sum_Xt_sq, Xt), axis=1)          # (nt, dim+2)
-
+    A = jnp.concatenate(
+        (jnp.sum(X_s**2, axis=1, keepdims=True), jnp.ones((ns,1), X_s.dtype), -2.0*X_s),
+        axis=1,
+    )
+    B = jnp.concatenate(
+        (jnp.ones((nt,1), X_t.dtype), jnp.sum(X_t**2, axis=1, keepdims=True), X_t),
+        axis=1,
+    )
     if rescale_cost:
-        # Rescale by sqrt of max absolute entries (to match torch behavior)
-        max_M1 = jnp.max(M1)
-        max_M2 = jnp.max(M2)
-        M1 = jnp.where(max_M1 > 0, M1 / jnp.sqrt(max_M1), M1)
-        M2 = jnp.where(max_M2 > 0, M2 / jnp.sqrt(max_M2), M2)
-
-    return M1, M2.T  # same return convention
-
+        # Optional mild rescaling (mirrors your torch code idea)
+        sA = jnp.sqrt(jnp.maximum(jnp.max(jnp.abs(A)), 1.0))
+        sB = jnp.sqrt(jnp.maximum(jnp.max(jnp.abs(B)), 1.0))
+        A = A / sA
+        B = B / sB
+    return A, B
 
 def low_rank_distance_factorization_jax(
     X1: jnp.ndarray,
