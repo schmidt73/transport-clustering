@@ -70,7 +70,7 @@ def sample_mixture(means: np.ndarray, counts: np.ndarray, sigma: float,
     pts = []
     labels = []
     for idx, n_i in enumerate(counts):
-        samp = rng.normal(loc=means[idx], scale=sigma, size=(n_i, dim))
+        samp = rng.normal(loc=means[idx], scale=np.sqrt(n_i), size=(n_i, dim))
         pts.append(samp)
         labels.append(np.full(n_i, idx, dtype=int))
     return np.vstack(pts), np.concatenate(labels)
@@ -85,9 +85,13 @@ def main() -> None:
             sys.exit("Error: --counts must supply k numbers")
         counts = np.asarray(args.counts, dtype=int)
     else:
-        base = args.n_total // k
-        counts = np.full(k, base, dtype=int)
-        counts[-1] += args.n_total - base * k
+        dividers = rng.choice(args.n_total-1, size=k-1, replace=False)
+        dividers = np.sort(dividers)
+        dividers = np.concatenate([[0], dividers, [args.n_total]])
+        counts = np.diff(dividers)
+        # Shuffle the counts to avoid systematic bias
+        rng.shuffle(counts)
+        print(counts)
 
     means = regular_simplex(k)
 

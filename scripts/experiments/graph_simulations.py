@@ -36,7 +36,6 @@ def shortest_path_cost_matrix(G: nx.Graph) -> np.ndarray:
             C[i, j] = d
     return C
 
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate random weighted graph and dump cost matrix.")

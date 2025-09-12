@@ -97,29 +97,8 @@ def monge_rotation_kmeans(C, X, Y, r, random_state=0):
     cost2 = jnp.sum(C * (Q2 @ jnp.diag(1 / (R2.T @ jnp.ones(n))) @ R2.T))
 
     logger.info(f"Cost 1: {cost1}, Cost 2: {cost2}")
-    return Q1 @ jnp.linalg.inv(Q1.T @ Q1), R1
-
-def plot_coclusters(X, Y, Q, R, title_suffix=""):
-    # Argmax labels
-    labels_X = jnp.argmax(Q, axis=1)
-    labels_Y = jnp.argmax(R, axis=1)
-
-    # Plot X with labels_X
-    plt.figure()
-    for k in jnp.unique(labels_X):
-        pts = X[labels_X == k]
-        plt.scatter(pts[:,0], pts[:,1], label=f"cluster {int(k)}", s=18)
-    plt.xlabel("x1")
-    plt.ylabel("x2")
-    plt.title(f"X clusters via argmax(Q){title_suffix}")
-
-    for k in jnp.unique(labels_Y):
-        pts = Y[labels_Y == k]
-        plt.scatter(pts[:,0], pts[:,1], label=f"cluster {int(k)}", s=18)
-    plt.xlabel("y1")
-    plt.ylabel("y2")
-    plt.title(f"Y clusters via argmax(R){title_suffix}")
     
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+    if cost1 < cost2:
+        return Q1, Q1.T @ jnp.ones(n), R1
+    else:
+        return Q2, R2.T @ jnp.ones(n), R2
