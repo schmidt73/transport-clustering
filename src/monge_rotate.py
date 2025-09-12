@@ -1,8 +1,13 @@
 
+import sys
 import numpy as np
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+
+import sys
+import GKMS.GKMS as gkms
+import torch
 
 import ott
 from ott.geometry import geometry
@@ -33,27 +38,54 @@ def monge_permutation(C):
     P_soft = solution.matrix
     return P_soft
 
-def monge_rotation_kmeans(C, X, Y, r, random_state=0):
-    P = monge_permutation(C)
+def stabilize_Q_init(Q, lambda_factor=0.5):
+    n, r = Q.shape[0], Q.shape[1]
+    eps_Q = jnp.ones((n, r)) / (n * r)
+    Q_init = (1 - lambda_factor) * Q + lambda_factor * eps_Q
+    return Q_init
+
+def gkms(C, Q_init, gamma=50.0, max_iter=100):
+    def compute_loss(Q):
+        return jnp.sum((Q.T @ C) * (jnp.diag(1 / jnp.sum(Q, axis=0)) @ Q.T))
+    compute_loss_and_grad = jax.jit(jax.value_and_grad(compute_loss))
+
+    n = C.shape[0]
+    Q_curr = Q_init
+    for _ in range(max_iter):
+        loss, grad = compute_loss_and_grad(Q_curr)
+        Q_new = Q_curr * jnp.exp(-gamma * grad)
+        row_scaling_vector = jnp.sum(Q_new, axis=1)
+        Q_new = jnp.diag(1 / (n * row_scaling_vector)) @ Q_new
+        Q_curr = Q_new
+    
+    return Q_curr
+    
+def monge_rotation_kmeans(C, X, Y, r, lambda_factor=0.5, random_state=0):
+    n = X.shape[0]
+    P = monge_permutation(C) * n
+
     logger.info("Computed Monge permutation, performing k-means initialization...")
     labels_X, centers_X = lloyds_kmeans(X, r, random_state=random_state)
     labels_Y, centers_Y = lloyds_kmeans(Y, r, random_state=random_state)
 
-    n = X.shape[0]
     Q1 = jnp.zeros((n, r))
-    Q1 = Q1.at[jnp.arange(n), labels_X].set(1.0)
+    Q1 = Q1.at[jnp.arange(n), labels_X].set(1.0 / n)
     R1 = P.T @ Q1
+    g1 = jnp.sum(Q1, axis=0)
 
     R2 = jnp.zeros((n, r))
-    R2 = R2.at[jnp.arange(n), labels_Y].set(1.0)
+    R2 = R2.at[jnp.arange(n), labels_Y].set(1.0 / n)
     Q2 = P @ R2
+    g2 = jnp.sum(Q2, axis=0)
 
-    cost1 = jnp.sum(C * (Q1 @ jnp.diag(1 / (Q1.T @ jnp.ones(n))) @ R1.T))
-    cost2 = jnp.sum(C * (Q2 @ jnp.diag(1 / (R2.T @ jnp.ones(n))) @ R2.T))
+    cost1 = jnp.sum(C * (Q1 @ jnp.diag(1 / g1) @ R1.T))
+    cost2 = jnp.sum(C * (Q2 @ jnp.diag(1 / g2) @ R2.T))
 
-    logger.info(f"Cost 1: {cost1}, Cost 2: {cost2}")
+    logger.info(f"Initialization Costs: ({cost1}, {cost2})")
 
     if cost1 < cost2:
-        return Q1, Q1.T @ jnp.ones(n), R1
+        Q = gkms(C @ P.T, stabilize_Q_init(Q1, lambda_factor=lambda_factor))
+        return Q, jnp.sum(Q, axis=0), P.T @ Q
     else:
-        return Q2, R2.T @ jnp.ones(n), R2
+        Q = gkms(P.T @ C, stabilize_Q_init(Q2, lambda_factor=lambda_factor))
+        return P @ Q, jnp.sum(Q, axis=0), Q
