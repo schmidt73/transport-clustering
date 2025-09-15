@@ -107,12 +107,12 @@ def _md_sinkhorn_step(Q: Array, R: Array, A: Array, B: Array,
     norm = jnp.maximum(jnp.max(jnp.abs(gq)), jnp.max(jnp.abs(gr)))
     gamma_k = gamma / jnp.clip(norm, 1e-18)
     eps = 1.0 / gamma_k
-
+    
     GQ = gq - (1.0 / gamma_k) * jnp.log(jnp.clip(Q, 1e-32))
     GR = gr - (1.0 / gamma_k) * jnp.log(jnp.clip(R, 1e-32))
-
-    Qn, fQn, gQn = log_sinkhorn_project(GQ, a, g, eps, max_iter=40, f=fQ, g=gQd)
-    Rn, fRn, gRn = log_sinkhorn_project(GR, b, g, eps, max_iter=40, f=fR, g=gRd)
+    
+    Qn, fQn, gQn = log_sinkhorn_project(GQ, a, g, eps, max_iter=15, f=fQ, g=gQd)
+    Rn, fRn, gRn = log_sinkhorn_project(GR, b, g, eps, max_iter=15, f=fR, g=gRd)
     return (Qn, Rn, fQn, gQn, fRn, gRn), None
 
 @partial(jax.jit, static_argnums=(2, 3))
@@ -145,6 +145,34 @@ def lrot_lr(A, B, r, iters=60, gamma=60.0, key=None):
 # =========================
 @partial(jax.jit, static_argnames=('cap',))
 def split_by_capacity_device(scores: jnp.ndarray, cap: int) -> jnp.ndarray:
+    # scores: (N, r) -> top `cap` row indices per column
+    # Returns indices of shape (r, cap), dtype int32
+    _, idx = lax.top_k(scores.T, k=cap)   # idx: (r, cap) in [0, N)
+    return idx.astype(jnp.int32)
+'''
+@partial(jax.jit, static_argnames=('cap',))
+def split_by_capacity_device(scores: jnp.ndarray, cap: int) -> jnp.ndarray:
+    # scores: (N, r)
+    N, r = scores.shape
+    out = jnp.zeros((r, cap), dtype=jnp.int32)
+
+    def body(t, carry):
+        live_scores, out = carry
+        # winners per column from current live_scores
+        winners = jnp.argmax(live_scores, axis=0).astype(jnp.int32)  # (r,)
+        out = out.at[:, t].set(winners)
+        # set entire selected rows to -inf in one batched scatter update
+        rows = winners  # length r, may repeat; repetition is fine (idempotent)
+        live_scores = live_scores.at[rows].set(-jnp.inf)
+        return (live_scores, out)
+
+    live0 = scores  # no where() each round
+    (_, out) = jax.lax.fori_loop(0, cap, body, (live0, out))
+    return out'''
+
+'''
+@partial(jax.jit, static_argnames=('cap',))
+def split_by_capacity_device(scores: jnp.ndarray, cap: int) -> jnp.ndarray:
     N, r = scores.shape
     taken = jnp.zeros((N,), dtype=bool)
     out = jnp.zeros((r, cap), dtype=jnp.int32)
@@ -158,8 +186,7 @@ def split_by_capacity_device(scores: jnp.ndarray, cap: int) -> jnp.ndarray:
         return taken, out
 
     taken, out = jax.lax.fori_loop(0, cap, body, (taken, out))
-    return out
-
+    return out'''
 
 # =========================
 #  One block (host ragged slicing, kernels jitted)
@@ -210,9 +237,13 @@ def hiref_lr_fast(
             if out is None:
                 new_frontier.append((idxX, idxY))
                 continue
+                
             Xi, Yi, cap = out
+            Xi_g = idxX[Xi]  # (r, cap) device gather once
+            Yi_g = idxY[Yi]  # (r, cap) device gather once
             for z in range(r):
-                new_frontier.append((idxX[Xi[z]], idxY[Yi[z]]))
+                new_frontier.append((Xi_g[z], Yi_g[z]))
+                
         frontier = new_frontier
 
     if not return_coupling:

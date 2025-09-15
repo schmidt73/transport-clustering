@@ -227,14 +227,17 @@ def _loss_lr_two(Q: jnp.ndarray, R: jnp.ndarray,
     return jnp.sum(jnp.sum(RB * SA, axis=1) / jnp.clip(g, 1e-18))
 
 # Optional adapter for your low-rank OT method
-def lowrank_monge_adapter(XA: np.ndarray, YB: np.ndarray, rank: int = 64, device: str = "cpu"):
+def lowrank_monge_adapter(XA: np.ndarray, YB: np.ndarray, 
+                          rank: int = 64, device: str = "cpu",
+                          ot_solver='HiRef'
+                         ):
     
     XA = np.asarray(XA, dtype=np.float64)
     YB = np.asarray(YB, dtype=np.float64)
     
     try:
         Q, g, R = mr_lr.monge_rotation_kmeans_LR(
-            XA, YB, rank, lambda_factor=0.5, random_state=0, epsilon=1e-2
+            XA, YB, rank, lambda_factor=0.5, random_state=0, epsilon=1e-2, ot_solver=ot_solver
         )
     except Exception as e:
         print(f"Low-rank method failed: {e}")

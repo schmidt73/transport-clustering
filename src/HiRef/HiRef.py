@@ -5,10 +5,6 @@ from typing import List, Tuple, Optional
 
 IndexArray = jnp.ndarray  # 1-D integer array
 
-# =========================
-# Log-domain Sinkhorn (balanced), with dual reuse
-# =========================
-
 def _cost_matrix(f, g, G, eps):
     return -(G - f[:, None] - g[None, :]) / eps
 
@@ -54,7 +50,7 @@ def initialize_couplings(a, b, g, gamma, max_iter=50, key=None):
     kQ, kR = jax.random.split(key, 2)
     N1, N2, r = a.shape[0], b.shape[0], g.shape[0]
     dtype = a.dtype
-
+    
     Cq = jax.random.uniform(kQ, (N1, r), dtype=dtype)
     Cr = jax.random.uniform(kR, (N2, r), dtype=dtype)
     eps = 1.0 / gamma
@@ -185,10 +181,10 @@ def hiref_lr(X: jnp.ndarray,
     # frontier of index-pairs
     frontier = [(jnp.arange(n), jnp.arange(n))]
     for level, r in enumerate(rank_schedule, start=1):
-        print(f'Refinement Level {level}')
+        # print(f'Refinement Level {level}')
         new_frontier = []
         for f, (idxX, idxY) in enumerate(frontier):
-            print(f'Frontier {f}/{len(frontier)}')
+            # print(f'Frontier {f}/{len(frontier)}')
             NX = idxX.size
             NY = idxY.size
             if min(NX, NY) <= base_rank:
