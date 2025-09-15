@@ -145,6 +145,13 @@ def lrot_lr(A, B, r, iters=60, gamma=60.0, key=None):
 # =========================
 @partial(jax.jit, static_argnames=('cap',))
 def split_by_capacity_device(scores: jnp.ndarray, cap: int) -> jnp.ndarray:
+    # scores: (N, r) -> top `cap` row indices per column
+    # Returns indices of shape (r, cap), dtype int32
+    _, idx = lax.top_k(scores.T, k=cap)   # idx: (r, cap) in [0, N)
+    return idx.astype(jnp.int32)
+'''
+@partial(jax.jit, static_argnames=('cap',))
+def split_by_capacity_device(scores: jnp.ndarray, cap: int) -> jnp.ndarray:
     # scores: (N, r)
     N, r = scores.shape
     out = jnp.zeros((r, cap), dtype=jnp.int32)
@@ -161,7 +168,7 @@ def split_by_capacity_device(scores: jnp.ndarray, cap: int) -> jnp.ndarray:
 
     live0 = scores  # no where() each round
     (_, out) = jax.lax.fori_loop(0, cap, body, (live0, out))
-    return out
+    return out'''
 
 '''
 @partial(jax.jit, static_argnames=('cap',))
@@ -230,9 +237,13 @@ def hiref_lr_fast(
             if out is None:
                 new_frontier.append((idxX, idxY))
                 continue
+                
             Xi, Yi, cap = out
+            Xi_g = idxX[Xi]  # (r, cap) device gather once
+            Yi_g = idxY[Yi]  # (r, cap) device gather once
             for z in range(r):
-                new_frontier.append((idxX[Xi[z]], idxY[Yi[z]]))
+                new_frontier.append((Xi_g[z], Yi_g[z]))
+                
         frontier = new_frontier
 
     if not return_coupling:
