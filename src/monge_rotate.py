@@ -89,8 +89,66 @@ def gkms(C, Q_init, gamma_init=2.0, rescale_gamma=True, max_iter=20000):
     loss = compute_loss(Q_curr)
     logger.info(f"Final loss: {loss}")
     return Q_curr
-    
-def monge_rotation_kmeans(C, X, Y, r, lambda_factor=0.5, random_state=0, kmeans_init=False):
+
+def tree_where(cond, a, b):
+    return jax.tree_util.tree_map(lambda x, y: jnp.where(cond, x, y), a, b)
+
+def sdp_subproblem_bm(
+    C: jnp.ndarray, K: int, *, r: int | None = None,
+    beta: float = 20.0, alpha: float = 1e-8,
+    tol: float = 1e-6, tol_primal: float = 1e-2,
+    nu : float = 0.9,  maxiter: int = 50_000, key: jax.Array | None = None,
+    verbose: bool = False, log_every: int = 1000
+):
+    n = C.shape[0]
+    r = 2 * K if r is None else r
+    if key is None: key = jax.random.PRNGKey(0)
+
+    one = jnp.ones((n, 1))
+    norm_one = jnp.linalg.norm(one)
+    sqrtK = jnp.sqrt(K)
+
+    def project(V):
+        Vp = jnp.maximum(V, 0.0)
+        nf = jnp.sqrt(jnp.sum(Vp * Vp))
+        scale = jnp.where(nf > 0, sqrtK / nf, 0.0)
+        return Vp * scale
+
+    def compute_objective(U, y):
+        return (
+            jnp.sum((C @ U) * U) + jnp.sum(y * (U @ (U.T @ one) - one)) 
+            + (beta / 2) * jnp.sum((U @ (U.T @ one) - one) ** 2)
+        )
+
+    compute_obj_and_grad = jax.value_and_grad(compute_objective, argnums=0)
+
+    y = jnp.zeros((n, 1))
+    U = project(jax.random.uniform(key, (n, r), minval=0.0, maxval=1.0 / n))
+
+    def body_fun(carry, idx):
+        U, y, alpha_prime = carry
+
+        obj, G = compute_obj_and_grad(U, y)
+        Unew = project(U - alpha_prime * G)
+        resid = (1 / alpha_prime) * jnp.linalg.norm(Unew - U)
+        infeas = Unew @ (Unew.T @ one) - one
+
+        cand1 = (U, y, nu * alpha_prime)
+        cand2 = (Unew, y, (1.0 / nu) * alpha_prime)
+        cand3 = (Unew, y + beta * infeas, alpha_prime)
+
+        cond1 = obj < compute_objective(Unew, y)
+        carry_tmp = tree_where(cond1, cand1, cand2)
+
+        cond2 = resid > tol_primal
+        new_carry = tree_where(cond2, carry_tmp, cand3)
+
+        return new_carry, obj
+
+    (U, y, alpha_prime), objs = jax.lax.scan(body_fun, (U, y, alpha), jnp.arange(maxiter))
+    return U.block_until_ready(), objs.block_until_ready()
+
+def monge_rotation_kmeans(C, X, Y, r, lambda_factor=0.1, random_state=0, kmeans_init=False):
     n = C.shape[0]
     P = monge_permutation(C)
     if kmeans_init:
@@ -119,12 +177,22 @@ def monge_rotation_kmeans(C, X, Y, r, lambda_factor=0.5, random_state=0, kmeans_
             Q = gkms(P.T @ C, stabilize_Q_init(Q2, lambda_factor=lambda_factor))
             return P @ Q, jnp.sum(Q, axis=0), Q 
 
-    Q1 = gkms(C @ P.T, random_Q_init(n, r, random_state=random_state))
+    def bm_init(C_tilde):
+        U, objective_values = sdp_subproblem_bm(C_tilde, r, verbose=True)
+        _, eigvecs = jnp.linalg.eigh(U @ U.T - (1 / n) * jnp.ones((n, n)))
+        top_eigvecs = eigvecs[:, -(r-1):]
+        labels, _ = lloyds_kmeans(top_eigvecs, r, random_state=random_state)
+        Q_init = jnp.zeros((n, r))
+        Q_init = Q_init.at[jnp.arange(n), labels].set(1.0 / n)
+        return stabilize_Q_init(Q_init, lambda_factor=lambda_factor)
+
+    Q_init_1 = bm_init(C @ P.T)
+    Q1 = gkms(C @ P.T, Q_init_1)
     R1 = P.T @ Q1
     cost1 = jnp.sum(C * (Q1 @ jnp.diag(1 / jnp.sum(Q1, axis=0)) @ R1.T))
-    logger.info(f"Cost: {cost1}")
 
-    R2 = gkms(P.T @ C, random_Q_init(n, r, random_state=random_state))
+    Q_init_2 = bm_init(P.T @ C)
+    R2 = gkms(P.T @ C, Q_init_2)
     Q2 = P @ R2
     cost2 = jnp.sum(C * (Q2 @ jnp.diag(1 / jnp.sum(Q2, axis=0)) @ R2.T))
 
