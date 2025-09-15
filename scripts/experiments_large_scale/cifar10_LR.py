@@ -204,6 +204,27 @@ def evaluate_plan(P: np.ndarray, yA: np.ndarray, yB: np.ndarray) -> Dict:
         "classes": classes,
     }
 
+# ===== Low-rank squared Euclidean factors: C = A B^T =====
+def lr_sqeuclidean_factors(X: jnp.ndarray, Y: jnp.ndarray, rescale: bool = False):
+    n, d = X.shape
+    A = jnp.concatenate([jnp.sum(X**2, axis=1, keepdims=True),
+                         jnp.ones((n,1), X.dtype),
+                         -2.0 * X], axis=1)              # (n, d+2)
+    B = jnp.concatenate([jnp.ones((n,1), Y.dtype),
+                         jnp.sum(Y**2, axis=1, keepdims=True),
+                         Y], axis=1)                     # (n, d+2)
+    if rescale:
+        sA = jnp.sqrt(jnp.maximum(jnp.max(jnp.abs(A)), 1.0))
+        sB = jnp.sqrt(jnp.maximum(jnp.max(jnp.abs(B)), 1.0))
+        A = A / sA
+        B = B / sB
+    return A, B
+
+def _loss_lr_two(Q: jnp.ndarray, R: jnp.ndarray,
+                 A: jnp.ndarray, B: jnp.ndarray, g: jnp.ndarray) -> jnp.ndarray:
+    SA = Q.T @ A          # (r,k)
+    RB = R.T @ B          # (r,k)
+    return jnp.sum(jnp.sum(RB * SA, axis=1) / jnp.clip(g, 1e-18))
 
 # Optional adapter for your low-rank OT method
 def lowrank_monge_adapter(XA: np.ndarray, YB: np.ndarray, rank: int = 64, device: str = "cpu"):
@@ -215,10 +236,14 @@ def lowrank_monge_adapter(XA: np.ndarray, YB: np.ndarray, rank: int = 64, device
         Q, g, R = mr_lr.monge_rotation_kmeans_LR(
             XA, YB, rank, lambda_factor=0.5, random_state=0, epsilon=1e-2
         )
-        P_lr = (Q @ jnp.diag(1/g) @ R)
     except Exception as e:
         print(f"Low-rank method failed: {e}")
         return None, None
-    C = pairwise_sqeuclidean(XA, YB).astype(np.float64)
-    cost = float((P_lr * C).sum())
-    return P_lr, cost
+    
+    A, B = lr_sqeuclidean_factors( XA, YB )
+    
+    SA = Q.T @ A
+    RB = R.T @ B
+    cost = _loss_lr_two(Q, R, A, B, g)
+    
+    return (Q, R, g), cost
