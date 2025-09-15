@@ -57,6 +57,7 @@ def GKMS_opt(C,Q,
         g = Q.sum(dim=0).clamp_min(1e-18)
         Lambda = torch.diag(1.0 / g)
         cost = torch.trace(( (Q.T @ C) @ Q) @ Lambda)
+        print(cost)
         errs.append(cost.cpu())
         
         if k >= max(2, min_iter):

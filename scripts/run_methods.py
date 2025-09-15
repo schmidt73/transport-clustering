@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 
 from ott.initializers.linear.initializers_lr import RandomInitializer
 from ott.geometry.pointcloud import PointCloud
+from ott.geometry.geometry import Geometry
 from ott.problems.linear import linear_problem
 from ott.solvers.linear import sinkhorn_lr
 from loguru import logger
@@ -80,7 +81,7 @@ def run_monge_conjugate(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None,
     if C is None and (X is None or Y is None):
         raise ValueError("Must provide either cost matrix C or both point clouds X and Y.")
     
-    if not C:
+    if C is None:
         C = compute_sqeuc_cost_matrix(X, Y, dtype=jnp.float32, normalize=True)
 
     start_time = time.time()
@@ -89,7 +90,7 @@ def run_monge_conjugate(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None,
     P = Q @ jnp.diag(1 / g) @ R.T
     end_time = time.time()
     solve_time = end_time - start_time
-    
+    #print(P.sum(axis=0), P.sum(axis=1))
     P = sinkhorn_rescaling(P, g1, g2, max_iter=3000, tol=1e-5)  # round all solutions to be 1e-5 feasible
     
     primal_cost = jnp.sum(C * P)
@@ -168,8 +169,8 @@ def run_lot(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None, Y: jnp.ndar
     if C is None and (X is None or Y is None):
         raise ValueError("Must provide either cost matrix C or both point clouds X and Y.")
     
-    if C:
-        geom = None
+    if C is not None:
+        geom = Geometry(cost_matrix=C, epsilon=0.001, scale_cost="max_cost")
     else:
         geom = PointCloud(x=X, y=Y, epsilon=0.001, scale_cost="max_cost")
 
@@ -234,6 +235,7 @@ if __name__ == "__main__":
     if args.cost_matrix:
         args.points = None
         C = np.loadtxt(args.cost_matrix)
+        C = jnp.array(C) / jnp.max(C)
         n, m = C.shape
 
     g1 = np.ones((n)) / n

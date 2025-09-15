@@ -27,22 +27,6 @@ def compute_sqeuc_cost_matrix_max(X, Y, *, dtype=jnp.float32):
     D  = jnp.maximum(D, 0)
     return jnp.maximum(jnp.max(D), jnp.finfo(D.dtype).tiny)
 
-def regular_simplex(k: int) -> np.ndarray:
-    """
-    Return k vertices of a regular simplex embedded in ℝ^{k−1}
-    with pairwise Euclidean distance exactly 1.
-
-    Construction: take standard basis in ℝ^{k}, subtract the centroid,
-    then scale by √(k / (2(k−1))) so ‖μ_i − μ_j‖₂ = 1.
-    We finally drop the last coordinate to live in ℝ^{k−1}.
-    """
-    e = np.eye(k)                       # shape (k, k)
-    centroid = np.full((k, 1), 1 / k)
-    verts = e - centroid                # centred in ℝ^{k}
-    scale = np.sqrt(k / (2.0 * (k - 1)))
-    verts *= scale
-    return verts[:, :-1]                # drop final coord → ℝ^{k−1}
-
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--k", type=int, required=True,
@@ -70,7 +54,7 @@ def sample_mixture(means: np.ndarray, counts: np.ndarray, sigma: float,
     pts = []
     labels = []
     for idx, n_i in enumerate(counts):
-        samp = rng.normal(loc=means[idx], scale=np.sqrt(n_i), size=(n_i, dim))
+        samp = rng.normal(loc=means[idx], scale=sigma / np.sqrt(dim), size=(n_i, dim))
         pts.append(samp)
         labels.append(np.full(n_i, idx, dtype=int))
     return np.vstack(pts), np.concatenate(labels)
@@ -93,12 +77,12 @@ def main() -> None:
         rng.shuffle(counts)
         print(counts)
 
-    means = regular_simplex(k)
+    means = np.eye(k)
 
     X, labels_X = sample_mixture(means, counts, args.sigma, rng)
 
     # Perturb means (isotropic Gaussian noise, τ = perturb_scale)
-    perturbations = rng.normal(scale=args.perturb_scale, size=means.shape)
+    perturbations = rng.normal(scale=args.perturb_scale / np.sqrt(means.shape[1]), size=means.shape)
     Y, labels_Y = [], []
     for idx in range(X.shape[0]):
         Y_i = X[idx] + perturbations[labels_X[idx]]
