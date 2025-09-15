@@ -57,7 +57,7 @@ def monge_permutation(C):
 
 def random_Q_init(n, r, random_state=None):
     key = jax.random.PRNGKey(random_state if random_state is not None else 0)
-    Q = jnp.abs(jax.random.normal(key, (n, r)))
+    Q = jnp.abs(jax.random.uniform(key, (n, r)))
     row_sums = jnp.sum(Q, axis=1, keepdims=True)
     Q = Q / (n * row_sums)
     return Q
@@ -68,24 +68,25 @@ def stabilize_Q_init(Q, lambda_factor=0.5):
     Q_init = (1 - lambda_factor) * Q + lambda_factor * eps_Q
     return Q_init
 
-def gkms(C, Q_init, gamma_init=1.0, rescale_gamma=True, max_iter=2000):
+def gkms(C, Q_init, gamma_init=2.0, rescale_gamma=True, max_iter=20000):
     def compute_loss(Q):
         return jnp.sum((Q.T @ C) * (jnp.diag(1 / jnp.sum(Q, axis=0)) @ Q.T))
-    compute_loss_and_grad = jax.jit(jax.value_and_grad(compute_loss))
+    
+    compute_loss_and_grad = jax.value_and_grad(compute_loss)
 
     n = C.shape[0]
-    gamma = gamma_init
-    Q_curr = Q_init
-    for _ in range(max_iter):
-        loss, grad = compute_loss_and_grad(Q_curr)
-        logger.info(f"Loss: {loss}, max|grad|: {jnp.max(jnp.abs(grad))}, gamma: {gamma}")
-        Q_new = Q_curr * jnp.exp(-gamma * grad)
+    def body_fun(carry, idx):
+        Q, gamma = carry
+        loss, grad = compute_loss_and_grad(Q)
+        Q_new = Q * jnp.exp(-gamma * grad)
         row_scaling_vector = jnp.sum(Q_new, axis=1)
         Q_new = jnp.diag(1 / (n * row_scaling_vector)) @ Q_new
-        Q_curr = Q_new
         if rescale_gamma:
             gamma = gamma_init / (jnp.max(jnp.abs(grad)) ** 2)
+        return (Q_new, gamma), loss
 
+    (Q_curr, _), losses = jax.lax.scan(body_fun, (Q_init, gamma_init), jnp.arange(max_iter))
+    loss = compute_loss(Q_curr)
     logger.info(f"Final loss: {loss}")
     return Q_curr
     
@@ -121,6 +122,7 @@ def monge_rotation_kmeans(C, X, Y, r, lambda_factor=0.5, random_state=0, kmeans_
     Q1 = gkms(C @ P.T, random_Q_init(n, r, random_state=random_state))
     R1 = P.T @ Q1
     cost1 = jnp.sum(C * (Q1 @ jnp.diag(1 / jnp.sum(Q1, axis=0)) @ R1.T))
+    logger.info(f"Cost: {cost1}")
 
     R2 = gkms(P.T @ C, random_Q_init(n, r, random_state=random_state))
     Q2 = P @ R2
