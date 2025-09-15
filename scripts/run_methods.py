@@ -86,7 +86,7 @@ def run_monge_conjugate(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None,
 
     start_time = time.time()
     C = jnp.array(C)
-    Q, g, R = mr.monge_rotation_kmeans(C, X, Y, rank)
+    Q, g, R = mr.monge_conjugate(C, rank)
     P = Q @ jnp.diag(1 / g) @ R.T
     end_time = time.time()
     solve_time = end_time - start_time
