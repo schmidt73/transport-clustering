@@ -17,7 +17,8 @@ def _cdist(X: jnp.ndarray, Y: jnp.ndarray) -> jnp.ndarray:
 
 def compute_lr_sqeuclidean_factors(X_s: jnp.ndarray,
                                    X_t: jnp.ndarray,
-                                   rescale_cost: bool = False):
+                                   rescale_cost: bool = False,
+                                   return_scale: bool = False):
     """
     Returns (A, B) such that C ≈ A @ B.T for squared Euclidean cost.
     A = [||x||^2, 1, -2x],  B = [1, ||y||^2, y]
@@ -39,6 +40,8 @@ def compute_lr_sqeuclidean_factors(X_s: jnp.ndarray,
         sB = jnp.sqrt(jnp.maximum(jnp.max(jnp.abs(B)), 1.0))
         A = A / sA
         B = B / sB
+        if return_scale:
+            return A, B, sA, sB
     return A, B
 
 def low_rank_distance_factorization_jax(

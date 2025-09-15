@@ -78,14 +78,18 @@ def gkms_lr(A, B, Q_init, gamma=50.0, max_iter=100, tol=1e-9, min_iter=25):
 
 def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
                              random_state=0, epsilon=1e-2, 
-                             ot_solver='HiRef', rescale=True):
+                             ot_solver='HiRef', rescale=True): #'HiRef'
     """
     Low-rank Monge-rotation k-means initializer + GKMS.
     Avoids forming C; rotates LR factors A,B and (Q1,R2) via P or via a permutation from HiRef.
     """
     n = X.shape[0]
     # LR factors for squared Euclidean: C = A @ B.T
-    A, B = dist_util.compute_lr_sqeuclidean_factors(X, Y, rescale_cost=rescale)
+    if rescale:
+        A, B, sA, sB = dist_util.compute_lr_sqeuclidean_factors(X, Y, rescale_cost=True, return_scale=True)
+    else:
+        sA = sB = 1
+        A, B = dist_util.compute_lr_sqeuclidean_factors(X, Y)
     
     # Lloyd init
     labels_X, centers_X = lloyds_kmeans(X, r, random_state=random_state)
@@ -98,12 +102,15 @@ def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
     # Compute Monge “rotation”
     if ot_solver == 'Sinkhorn':
         # soft plan (dense); keep matmuls
-        P = ott_soft_monge_plan_pointcloud(X, Y, epsilon=epsilon) * n
-
-        # Rotate memberships by the Monge plan
+        P = ott_soft_monge_plan_pointcloud(X, Y, epsilon=epsilon)
+        primal_cost = jnp.sum( (A @ B.T) * P )*sA*sB
+        print(f'Computed Primal Coupling (Sinkhorn) with cost: {primal_cost}')
+        P = P * n # Scale to be permutation-scale
+        
+        # Rotate memberships by the (here, soft) Monge permutation
         R1 = P.T @ Q1              # corresponds to right-rotation (C @ P^T)
         Q2 = P @ R2                # corresponds to left-rotation (P @ R2)
-
+        
         # Initial costs via LR formula (no C)
         cost1 = lr_cost(A, B, Q1, R1)
         cost2 = lr_cost(A, B, Q2, R2)
@@ -134,8 +141,15 @@ def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
         # returns list of (idxX, idxY) leaves
         frontier = HiRef.hiref_lr(
             XA, YB, rank_schedule, iters_per_level=100, gamma=60.0,
-            rescale_cost=False, return_coupling=False
+            rescale_cost=rescale, return_coupling=False
         )
+        primal_cost = HiRef.compute_ot_cost(
+            frontier,
+            XA, YB,
+            sq_euclidean=True,
+        )
+        print(f'Computed Primal Coupling (HiRef) with cost {primal_cost}')
+        
         # permutation vectors
         pi, inv_pi = _clusters_to_perm(frontier, n)   # pi[i]=j ; inv_pi[j]=i
         
