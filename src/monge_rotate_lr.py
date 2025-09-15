@@ -104,8 +104,8 @@ def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
     if ot_solver == 'Sinkhorn':
         # soft plan (dense); keep matmuls
         P = ott_soft_monge_plan_pointcloud(X, Y, epsilon=epsilon)
-        primal_cost = jnp.sum( (A @ B.T) * P )*sA*sB
-        print(f'Computed Primal Coupling (Sinkhorn) with cost: {primal_cost}')
+        #primal_cost = jnp.sum( (A @ B.T) * P )*sA*sB
+        #print(f'Computed Primal Coupling (Sinkhorn) with cost: {primal_cost}')
         P = P * n # Scale to be permutation-scale
         
         # Rotate memberships by the (here, soft) Monge permutation
@@ -144,12 +144,13 @@ def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
             XA, YB, rank_schedule, iters_per_level=100, gamma=60.0,
             rescale_cost=rescale, return_coupling=False
         )
+        '''
         primal_cost = HiRef_fast.compute_ot_cost(
             frontier,
             XA, YB,
             sq_euclidean=True,
         )
-        print(f'Computed Primal Coupling (HiRef) with cost {primal_cost}')
+        print(f'Computed Primal Coupling (HiRef) with cost {primal_cost}')'''
         
         # permutation vectors
         pi, inv_pi = _clusters_to_perm(frontier, n)   # pi[i]=j ; inv_pi[j]=i
