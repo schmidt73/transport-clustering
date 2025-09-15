@@ -17,6 +17,7 @@ import distance_utils as dist_util
 import sys
 sys.path.insert(0, '../src/HiRef/')
 import HiRef
+import HiRef_fast
 import rank_annealing
 
 def ott_soft_monge_plan_pointcloud(X, Y, epsilon=1e-2):
@@ -139,11 +140,11 @@ def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
             XA = jnp.asarray(X)
             YB = jnp.asarray(Y)
         # returns list of (idxX, idxY) leaves
-        frontier = HiRef.hiref_lr(
+        frontier = HiRef_fast.hiref_lr_fast(
             XA, YB, rank_schedule, iters_per_level=100, gamma=60.0,
             rescale_cost=rescale, return_coupling=False
         )
-        primal_cost = HiRef.compute_ot_cost(
+        primal_cost = HiRef_fast.compute_ot_cost(
             frontier,
             XA, YB,
             sq_euclidean=True,

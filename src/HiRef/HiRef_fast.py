@@ -107,10 +107,10 @@ def _md_sinkhorn_step(Q: Array, R: Array, A: Array, B: Array,
     norm = jnp.maximum(jnp.max(jnp.abs(gq)), jnp.max(jnp.abs(gr)))
     gamma_k = gamma / jnp.clip(norm, 1e-18)
     eps = 1.0 / gamma_k
-
+    
     GQ = gq - (1.0 / gamma_k) * jnp.log(jnp.clip(Q, 1e-32))
     GR = gr - (1.0 / gamma_k) * jnp.log(jnp.clip(R, 1e-32))
-
+    
     Qn, fQn, gQn = log_sinkhorn_project(GQ, a, g, eps, max_iter=15, f=fQ, g=gQd)
     Rn, fRn, gRn = log_sinkhorn_project(GR, b, g, eps, max_iter=15, f=fR, g=gRd)
     return (Qn, Rn, fQn, gQn, fRn, gRn), None
