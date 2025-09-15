@@ -4,6 +4,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 import sys
 import GKMS.GKMS as gkms
@@ -105,7 +106,7 @@ def sdp_subproblem_bm(
     (U, y, alpha_prime), objs = jax.lax.scan(body_fun, (U, y, alpha), jnp.arange(maxiter))
     return U.block_until_ready(), objs.block_until_ready()
 
-def gkms(C, Q_init, gamma_init=2.0, rescale_gamma=True, max_iter=20000):
+def gkms(C, Q_init, gamma_init=2.0, rescale_gamma=True, max_iter=10000):
     def compute_loss(Q):
         return jnp.sum((Q.T @ C) * (jnp.diag(1 / jnp.sum(Q, axis=0)) @ Q.T))
     
@@ -125,9 +126,18 @@ def gkms(C, Q_init, gamma_init=2.0, rescale_gamma=True, max_iter=20000):
     (Q_curr, _), losses = jax.lax.scan(body_fun, (Q_init, gamma_init), jnp.arange(max_iter))
     loss = compute_loss(Q_curr)
     logger.info(f"Final loss: {loss}")
-    return Q_curr
+    return Q_curr, losses
 
-def monge_conjugate(C, r, lambda_factor=0.1, random_state=0, bm_init=False):
+def save_loss_plot(losses, filename):
+    fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+    n = len(losses)
+    losses = losses[(n // 2):]
+    sns.scatterplot(x=jnp.arange(n // 2, n), y=losses, ax=ax)
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Loss")
+    plt.savefig(filename)
+
+def monge_conjugate(C, r, lambda_factor=0.1, random_state=0, bm_init=False, debug=False):
     n = C.shape[0]
     P = monge_permutation(C)
 
@@ -138,25 +148,33 @@ def monge_conjugate(C, r, lambda_factor=0.1, random_state=0, bm_init=False):
         labels, _ = lloyds_kmeans(top_eigvecs, r, random_state=random_state)
         Q_init = jnp.zeros((n, r))
         Q_init = Q_init.at[jnp.arange(n), labels].set(1.0 / n)
-        return stabilize_Q_init(Q_init, lambda_factor=lambda_factor)
-
+        return stabilize_Q_init(Q_init, lambda_factor=lambda_factor), objective_values
+        
     if bm_init:
-        Q_init_1 = bm_initializer(C @ P.T @ jnp.diag(1 / jnp.sum(P, axis=1)))
+        Q_init_1, losses = bm_initializer(C @ P.T @ jnp.diag(1 / jnp.sum(P, axis=1)))
+        if debug: save_loss_plot(losses, "bm_init1_loss.png")
     else:
         Q_init_1 = random_Q_init(n, r, random_state=random_state)
 
-    Q1 = gkms(C @ P.T @ jnp.diag(1 / jnp.sum(P, axis=1)), Q_init_1)
+    logger.info("Running GKMS with CP^T initialization")
+    Q1, losses = gkms(C @ P.T @ jnp.diag(1 / jnp.sum(P, axis=1)), Q_init_1)
     R1 = P.T @ jnp.diag(1 / jnp.sum(P, axis=1)) @ Q1
     cost1 = jnp.sum(C * (Q1 @ jnp.diag(1 / jnp.sum(Q1, axis=0)) @ R1.T))
 
+    if debug: save_loss_plot(losses, "gkms1_loss.png")
+
     if bm_init:
-        Q_init_2 = bm_init(jnp.diag(1 / jnp.sum(P, axis=0)) @ P.T @ C)
+        Q_init_2, losses = bm_initializer(jnp.diag(1 / jnp.sum(P, axis=0)) @ P.T @ C)
+        if debug: save_loss_plot(losses, "bm_init2_loss.png")
     else:
         Q_init_2 = random_Q_init(n, r, random_state=random_state+1)
 
-    R2 = gkms(jnp.diag(1 / jnp.sum(P, axis=0)) @ P.T @ C, Q_init_2)
+    logger.info("Running GKMS with P^TC initialization")
+    R2, losses = gkms(jnp.diag(1 / jnp.sum(P, axis=0)) @ P.T @ C, Q_init_2)
     Q2 = P @ jnp.diag(1 / jnp.sum(P, axis=0)) @ R2
     cost2 = jnp.sum(C * (Q2 @ jnp.diag(1 / jnp.sum(Q2, axis=0)) @ R2.T))
+
+    if debug: save_loss_plot(losses, "gkms2_loss.png")
 
     logger.info(f"Costs: ({cost1}, {cost2})")
 
