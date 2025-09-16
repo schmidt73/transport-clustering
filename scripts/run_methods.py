@@ -10,6 +10,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import time
 
+import json
 import pandas as pd
 import argparse as ap
 import numpy as np
@@ -86,11 +87,10 @@ def run_monge_conjugate(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None,
 
     start_time = time.time()
     C = jnp.array(C)
-    Q, g, R = mr.monge_conjugate(C, rank, bm_init=True, debug=True)
+    Q, g, R = mr.monge_conjugate(C, rank, bm_init=True, debug=False)
     P = Q @ jnp.diag(1 / g) @ R.T
     end_time = time.time()
     solve_time = end_time - start_time
-    #print(P.sum(axis=0), P.sum(axis=1))
     P = sinkhorn_rescaling(P, g1, g2, max_iter=3000, tol=1e-5)  # round all solutions to be 1e-5 feasible
     
     primal_cost = jnp.sum(C * P)
@@ -106,9 +106,9 @@ def run_monge_conjugate(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None,
         "rank": rank,
         "simulation_seed": args.seed,
         "algorithm": args.algorithm,
-        "l1_row_marginal_error": l1_row_error,
-        "l1_col_marginal_error": l1_col_error,
-        "l1_total_error": l1_error,
+        "l1_row_marginal_error": float(l1_row_error),
+        "l1_col_marginal_error": float(l1_col_error),
+        "l1_total_error": float(l1_error),
         "runtime": solve_time
     }
     
@@ -127,7 +127,7 @@ def run_frlc(
     if C is None and (X is None or Y is None):
         raise ValueError("Must provide either cost matrix C or both point clouds X and Y.")
     
-    if not C:
+    if C is None:
         C = compute_sqeuc_cost_matrix(X, Y, dtype=jnp.float32, normalize=True)
 
     C = torch.tensor(np.array(C), device=device, dtype=dtype)
@@ -156,9 +156,9 @@ def run_frlc(
         "rank": rank,
         "simulation_seed": args.seed,
         "algorithm": args.algorithm,
-        "l1_row_marginal_error": l1_row_error,
-        "l1_col_marginal_error": l1_col_error,
-        "l1_total_error": l1_error,
+        "l1_row_marginal_error": float(l1_row_error),
+        "l1_col_marginal_error": float(l1_col_error),
+        "l1_total_error": float(l1_error),
         "runtime": solve_time
     }
 
@@ -197,9 +197,9 @@ def run_lot(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None, Y: jnp.ndar
         "simulation_seed": args.seed,
         "num_restart": 0,
         "algorithm": args.algorithm,
-        "l1_row_marginal_error": l1_row_error,
-        "l1_col_marginal_error": l1_col_error,
-        "l1_total_error": l1_error,
+        "l1_row_marginal_error": float(l1_row_error),
+        "l1_col_marginal_error": float(l1_col_error),
+        "l1_total_error": float(l1_error),
         "runtime": solve_time
     }
 
@@ -213,7 +213,7 @@ def parse_args():
                           help="Paths to X and Y point sets.")
     parser.add_argument("-r", "--rank", type=int, default=5)
     parser.add_argument("-s", "--seed", type=int, default=0)
-    parser.add_argument("-o", "--output", type=str, default="results")
+    parser.add_argument("-o", "--output", type=str, default="results.json")
     parser.add_argument("-a", "--algorithm", default="clrot", choices=["mr", "frlc", "lot"])
     parser.add_argument("--restarts", type=int, default=10)
     parser.add_argument("--visualize", action="store_true", help="Visualize transport matrix.")
@@ -257,4 +257,7 @@ if __name__ == "__main__":
     if args.visualize:
         visualize_transport_matrix(P, args.algorithm, result["objective_cost"], rank)
     
-    print(result)            
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump(result, f)
+        logger.info(f"Saved results to {args.output}")

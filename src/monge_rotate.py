@@ -55,7 +55,7 @@ def sdp_subproblem_bm(
     C: jnp.ndarray, K: int, *, r: int | None = None,
     beta: float = 20.0, alpha: float = 1e-8,
     tol: float = 1e-6, tol_primal: float = 1e-2,
-    nu : float = 0.9,  maxiter: int = 50_000, key: jax.Array | None = None,
+    nu : float = 0.9,  maxiter: int = 250_000, key: jax.Array | None = None,
     verbose: bool = False, log_every: int = 1000
 ):
     n = C.shape[0]
