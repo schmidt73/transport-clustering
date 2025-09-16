@@ -76,7 +76,14 @@ def sinkhorn_rescaling(P, g1, g2, max_iter=100, tol=1e-4):
             break
     return P
 
-def run_monge_conjugate(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None, Y: jnp.ndarray = None, C: jnp.ndarray = None):
+def run_monge_conjugate(
+        seed : int, 
+        g1: jnp.ndarray, 
+        g2: jnp.ndarray, 
+        X: jnp.ndarray = None, 
+        Y: jnp.ndarray = None, 
+        C: jnp.ndarray = None
+    ):
     """Run the Monge Conjugation algorithm.
     """
     if C is None and (X is None or Y is None):
@@ -87,7 +94,7 @@ def run_monge_conjugate(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None,
 
     start_time = time.time()
     C = jnp.array(C)
-    Q, g, R = mr.monge_conjugate(C, rank, bm_init=True, debug=False)
+    Q, g, R = mr.monge_conjugate(C, rank, random_state=seed, bm_init=False, debug=False)
     P = Q @ jnp.diag(1 / g) @ R.T
     end_time = time.time()
     solve_time = end_time - start_time
@@ -115,6 +122,7 @@ def run_monge_conjugate(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None,
     return Q, g, R, result
 
 def run_frlc(
+    seed: int,
     g1: jnp.ndarray, 
     g2: jnp.ndarray, 
     X: jnp.ndarray = None, 
@@ -166,7 +174,14 @@ def run_frlc(
 
     return Q, g, R, res
 
-def run_lot(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None, Y: jnp.ndarray = None, C: jnp.ndarray = None):
+def run_lot(
+        seed: int,
+        g1: jnp.ndarray, 
+        g2: jnp.ndarray, 
+        X: jnp.ndarray = None, 
+        Y: jnp.ndarray = None, 
+        C: jnp.ndarray = None
+    ):
     """Run the LOT algorithm."""
     if C is None and (X is None or Y is None):
         raise ValueError("Must provide either cost matrix C or both point clouds X and Y.")
@@ -176,12 +191,13 @@ def run_lot(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None, Y: jnp.ndar
     else:
         geom = PointCloud(x=X, y=Y, epsilon=0.001, scale_cost="max_cost")
 
+    rng = jax.random.PRNGKey(seed if seed is not None else 0)
     ot_prob = linear_problem.LinearProblem(geom, g1, g2)
     start_time = time.time()
     solver = sinkhorn_lr.LRSinkhorn(rank=rank, initializer=RandomInitializer(rank))
     end_time = time.time()
     solve_time = end_time - start_time
-    ot_lr = solver(ot_prob)
+    ot_lr = solver(ot_prob, rng=rng)
 
     P = ot_lr.matrix
     P = sinkhorn_rescaling(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
@@ -247,14 +263,14 @@ if __name__ == "__main__":
 
     result = None
     if args.algorithm == "mr":
-        Q, g, R, result = run_monge_conjugate(g1, g2, X, Y, C)
+        Q, g, R, result = run_monge_conjugate(args.seed, g1, g2, X, Y, C)
     elif args.algorithm == "frlc": 
         torch.manual_seed(args.seed)
         torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         torch_dtype  = torch.float64
-        Q, g, R, result = run_frlc(g1, g2, X, Y, C, device=torch_device, dtype=torch_dtype)
+        Q, g, R, result = run_frlc(args.seed, g1, g2, X, Y, C, device=torch_device, dtype=torch_dtype)
     elif args.algorithm == "lot":
-        Q, g, R, result = run_lot(g1, g2, X, Y, C)
+        Q, g, R, result = run_lot(args.seed, g1, g2, X, Y, C)
 
     P = jnp.array(Q @ jnp.diag(1.0 / g) @ R.T)
     if args.visualize:
