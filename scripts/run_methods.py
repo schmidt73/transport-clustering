@@ -112,7 +112,7 @@ def run_monge_conjugate(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None,
         "runtime": solve_time
     }
     
-    return P, result
+    return Q, g, R, result
 
 def run_frlc(
     g1: jnp.ndarray, 
@@ -132,14 +132,16 @@ def run_frlc(
 
     C = torch.tensor(np.array(C), device=device, dtype=dtype)
     start_time = time.time()
-    P, errs = frlc.FRLC_opt(
-        C, device=device, r=rank, max_iter=20, returnFull=True, gamma=70, 
+    Q, R, g, errs = frlc.FRLC_opt(
+        C, device=device, r=rank, max_iter=20, returnFull=False, diagonalize_return=True, gamma=70, 
         max_inneriters_balanced=500, max_inneriters_relaxed=500
     )
+    Q = Q.cpu().numpy()
+    R = R.cpu().numpy()
+    g = np.diagonal(g.cpu().numpy())
     end_time   = time.time()
     solve_time = end_time - start_time
-
-    P = jnp.array(P.cpu().numpy())
+    P = jnp.array(Q @ jnp.diag(1.0 / g) @ R.T)
     P = sinkhorn_rescaling(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
 
     primal_cost = jnp.sum(C.cpu().numpy() * P)
@@ -162,7 +164,7 @@ def run_frlc(
         "runtime": solve_time
     }
 
-    return P, res
+    return Q, g, R, res
 
 def run_lot(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None, Y: jnp.ndarray = None, C: jnp.ndarray = None):
     """Run the LOT algorithm."""
@@ -203,7 +205,7 @@ def run_lot(g1: jnp.ndarray, g2: jnp.ndarray, X: jnp.ndarray = None, Y: jnp.ndar
         "runtime": solve_time
     }
 
-    return P, res
+    return ot_lr.q, ot_lr.g, ot_lr.r, res
 
 def parse_args():
     parser = ap.ArgumentParser()
@@ -213,7 +215,7 @@ def parse_args():
                           help="Paths to X and Y point sets.")
     parser.add_argument("-r", "--rank", type=int, default=5)
     parser.add_argument("-s", "--seed", type=int, default=0)
-    parser.add_argument("-o", "--output", type=str, default="results.json")
+    parser.add_argument("-o", "--output", type=str, default="algorithm")
     parser.add_argument("-a", "--algorithm", default="clrot", choices=["mr", "frlc", "lot"])
     parser.add_argument("--restarts", type=int, default=10)
     parser.add_argument("--visualize", action="store_true", help="Visualize transport matrix.")
@@ -245,19 +247,24 @@ if __name__ == "__main__":
 
     result = None
     if args.algorithm == "mr":
-        P, result = run_monge_conjugate(g1, g2, X, Y, C)
+        Q, g, R, result = run_monge_conjugate(g1, g2, X, Y, C)
     elif args.algorithm == "frlc": 
         torch.manual_seed(args.seed)
         torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         torch_dtype  = torch.float64
-        P, result = run_frlc(g1, g2, X, Y, C, device=torch_device, dtype=torch_dtype)
+        Q, g, R, result = run_frlc(g1, g2, X, Y, C, device=torch_device, dtype=torch_dtype)
     elif args.algorithm == "lot":
-        P, result = run_lot(g1, g2, X, Y, C)
-        
+        Q, g, R, result = run_lot(g1, g2, X, Y, C)
+
+    P = jnp.array(Q @ jnp.diag(1.0 / g) @ R.T)
     if args.visualize:
         visualize_transport_matrix(P, args.algorithm, result["objective_cost"], rank)
     
     if args.output:
-        with open(args.output, "w") as f:
+        with open(args.output + "_results.json", "w") as f:
             json.dump(result, f)
-        logger.info(f"Saved results to {args.output}")
+        logger.info(f"Saved summary of results to {args.output}_results.json")
+        np.savetxt(args.output + "_Q.txt", Q)
+        np.savetxt(args.output + "_g.txt", g)
+        np.savetxt(args.output + "_R.txt", R)
+        logger.info(f"Saved factors Q, g, R to {args.output}_Q.txt, {args.output}_g.txt, {args.output}_R.txt")
