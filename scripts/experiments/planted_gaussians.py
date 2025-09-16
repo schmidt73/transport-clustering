@@ -19,13 +19,12 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-def compute_sqeuc_cost_matrix_max(X, Y, *, dtype=jnp.float32):
+def compute_sqeuc_cost_matrix(X, Y, *, dtype=jnp.float32):
     x2 = jnp.sum(X * X, axis=1)
     y2 = jnp.sum(Y * Y, axis=1)
     G  = X @ Y.T
     D  = x2[:, None] + y2[None, :] - 2.0 * G
-    D  = jnp.maximum(D, 0)
-    return jnp.maximum(jnp.max(D), jnp.finfo(D.dtype).tiny)
+    return D
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -97,7 +96,8 @@ def main() -> None:
         label_to_X[labels_X[i]].append(i)
         label_to_Y[labels_Y[i]].append(i)
 
-    max_cost = compute_sqeuc_cost_matrix_max(jnp.array(X), jnp.array(Y))
+    C = compute_sqeuc_cost_matrix(jnp.array(X), jnp.array(Y))
+    max_cost = float(jnp.max(C))
     total_cost = 0
     P_sum = 0
     for i in range(k):
@@ -110,10 +110,19 @@ def main() -> None:
 
     if args.out:
         np.savetxt(args.out + "_X.txt", X, fmt="%.6f")
-        print(f"X samples saved to {args.out}_X.txt (shape {X.shape})", file=sys.stderr)    
+        print(f"X samples saved to {args.out}_X.txt (shape {X.shape})", file=sys.stderr)
+
+        np.savetxt(args.out + "_labels_X.txt", labels_X, fmt="%d")
+        print(f"X labels saved to {args.out}_labels_X.txt (shape {labels_X.shape})", file=sys.stderr)      
 
         np.savetxt(args.out + "_Y.txt", Y, fmt="%.6f")
         print(f"Y samples saved to {args.out}_Y.txt (shape {Y.shape})", file=sys.stderr)
+
+        np.savetxt(args.out + "_labels_Y.txt", labels_Y, fmt="%d")
+        print(f"Y labels saved to {args.out}_labels_Y.txt (shape {labels_Y.shape})", file=sys.stderr)
+
+        np.savetxt(args.out + "_cost_matrix.txt", C, fmt="%.6f")
+        print(f"Cost matrix saved to {args.out}_cost_matrix.txt (shape {C.shape})", file=sys.stderr)
 
         metadata = {
             "k": k,
