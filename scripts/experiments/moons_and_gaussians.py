@@ -33,18 +33,19 @@ def eight_normal_sample(n, dim, scale=1, var=1):
     data = torch.stack(data)
     return data
 
-def sample_moons(n):
-    x0, _ = generate_moons(n, noise=0.5)
+def sample_moons(n, noise=0.1):
+    x0, _ = generate_moons(n, noise=noise)
     return x0 * 3 - 1
 
-def sample_8gaussians(n):
-    return eight_normal_sample(n, 2, scale=5, var=0.2).float()
+def sample_8gaussians(n, noise=0.1):
+    return eight_normal_sample(n, 2, scale=5, var=noise).float()
 
 def parse_args():
     parser = ap.ArgumentParser()
     parser.add_argument("-n", "--n", type=int, default=100)
     parser.add_argument("-s", "--seed", type=int, default=0)
     parser.add_argument("-o", "--output", type=str, default=None)
+    parser.add_argument("--noise", type=float, default=0.1)
     return parser.parse_args()
 
 if __name__ == "__main__":
@@ -60,8 +61,8 @@ if __name__ == "__main__":
     g1 = np.ones((batch_size1)) / batch_size1
     g2 = np.ones((batch_size2)) / batch_size2
 
-    x0 = sample_8gaussians(batch_size1)
-    x1 = sample_moons(batch_size2)
+    x0 = sample_8gaussians(batch_size1, noise=args.noise)
+    x1 = sample_moons(batch_size2, noise=args.noise)
 
     C = distance.cdist(x0, x1)
     C = C / C.max()
