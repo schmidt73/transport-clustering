@@ -19,6 +19,7 @@ sys.path.insert(0, '../src/HiRef/')
 import HiRef
 import HiRef_fast
 import rank_annealing
+from sklearn.cluster import KMeans
 
 def ott_soft_monge_plan_pointcloud(X, Y, epsilon=1e-2):
     """Balanced Sinkhorn on point clouds, returns soft plan P (n x n)."""
@@ -93,8 +94,9 @@ def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
         A, B = dist_util.compute_lr_sqeuclidean_factors(X, Y)
     
     # Lloyd init
-    labels_X, centers_X = lloyds_kmeans(X, r, random_state=random_state)
-    labels_Y, centers_Y = lloyds_kmeans(Y, r, random_state=random_state)
+    kmeans = KMeans(n_clusters=r, n_init=r, random_state=random_state)
+    labels_X = kmeans.fit_predict(X)
+    labels_Y = kmeans.fit_predict(Y)
 
     # One-hot membership matrices on rows, scaled by 1/n
     Q1 = jnp.zeros((n, r)).at[jnp.arange(n), labels_X].set(1.0 / n)
