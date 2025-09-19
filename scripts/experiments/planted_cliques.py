@@ -69,7 +69,9 @@ def main():
     )
 
     C, names_to_indices = shortest_path_cost_matrix(G)
-    
+    indices_to_names = {i: name for name, i in names_to_indices.items()}
+    labels = [G.nodes[i]["clique"] for i in G.nodes]
+
     P = np.zeros_like(C)
     for i in G.nodes:
         for j in G.nodes:
@@ -83,6 +85,8 @@ def main():
     if args.output:
         np.savetxt(args.output + "_cost_matrix.txt", C, fmt="%.4f")
         np.savetxt(args.output + "_optimal_plan.txt", P, fmt="%.4f")
+        np.savetxt(args.output + "_labels_X.txt", np.array(labels), fmt="%d")
+        np.savetxt(args.output + "_labels_Y.txt", np.array(labels), fmt="%d")
         metadata = {
             "k": args.k,
             "m": args.m,
