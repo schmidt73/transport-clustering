@@ -8,127 +8,73 @@ import numpy as np
 A number of useful functions and sub-routines for the main FRLC routine FRLC_iteration
 '''
 
-def initialize_couplings(a, b, gQ, gR, gamma, \
-                         full_rank=True, device='cpu', \
-                         dtype=torch.float64, rank2_random=False, \
-                        max_iter=50):
-    '''
-    ------Parameters------
-    a: torch tensor
-        Left outer marginal, should be positive and sum to 1.0
-    b: torch tensor
-        Right outer marginal, should be positive and sum to 1.0
-    gQ: torch tensor
-        Left inner marginal, should be positive and sum to 1.0
-    gR: torch tensor
-        Right inner marginal, should be positive and sum to 1.0
-    gamma: float
-        Step-size of the coordinate MD
-    full_rank: bool
-        If True, initialize a full-rank set of sub-couplings.
-        Else if False, initialize with a rank-2 initialization.
-    device: str
-        'cpu' if running on CPU, else 'cuda' for GPU
-    dtype: torch dtype
-        Defaults to float64
-    rank2_random: bool
-        If False, use deterministic rank 2 initialization of Scetbon '21
-        Else, use an initialization with randomly sampled vector on simplex.
-    max_iter: int
-        The maximum number of Sinkhorn iterations for initialized sub-couplings.
-    '''
+def initialize_couplings(
+    a, b, gQ, gR, gamma,
+    full_rank=True, device='cpu',
+    dtype=torch.float64, rank2_random=False,
+    max_iter=50, seed: int | None = None,
+    gen: torch.Generator | None = None
+):
+    
+    if gen is None:
+        if seed is not None:
+            _, gen_cuda = make_generators(seed, device)
+            gen = gen_cuda if device.startswith('cuda') else make_generators(seed, 'cpu')[0]
+
     N1, N2 = a.size(dim=0), b.size(dim=0)
     r, r2 = gQ.size(dim=0), gR.size(dim=0)
-    one_N1 = torch.ones((N1), device=device, dtype=dtype)
-    one_N2 = torch.ones((N2), device=device, dtype=dtype)
-    
-    if full_rank:
-        '''
-        A means of initializing full-rank sub-coupling matrices using randomly sampled matrices
-        and Sinkhorn projection onto the polytope of feasible couplings.
+    one_N1 = torch.ones((N1,), device=device, dtype=dtype)
+    one_N2 = torch.ones((N2,), device=device, dtype=dtype)
 
-        Only non-diagonal initialization for the LC-factorization and handles the case of unequal
-        inner left and right ranks (non-square latent couplings).
-        '''
-        # 1. Q-generation
-        # Generate a random (full-rank) matrix as our coupling initialization
-        C_random = torch.rand((N1,r), device=device, dtype=dtype)
-        '''
-        # Generate a random Kernel
-        xi_random = torch.exp( -C_random )
-        # Generate a random coupling
-        u, v = Sinkhorn(xi_random, a, gQ, N1, r, gamma, device=device, max_iter=max_iter, dtype=dtype)
-        Q = torch.diag(u) @ xi_random @ torch.diag(v)
-        '''
-        Q,_,_ = logSinkhorn(C_random, a, gQ, gamma, max_iter = max_iter, \
-                         device=device, dtype=dtype, balanced=True, unbalanced=False)
-        
-        # 2. R-generation
-        C_random = torch.rand((N2,r2), device=device, dtype=dtype)
-        '''
-        xi_random = torch.exp( -C_random )
-        u, v = Sinkhorn(xi_random, b, gR, N2, r2, gamma, device=device, max_iter=max_iter, dtype=dtype)
-        R = torch.diag(u) @ xi_random @ torch.diag(v)'''
-        R,_,_ = logSinkhorn(C_random, b, gR, gamma, max_iter = max_iter, \
-                         device=device, dtype=dtype, balanced=True, unbalanced=False)
-        
-        # 3. T-generation
+    if full_rank:
+        # 1) Q-generation
+        C_random = torch.rand((N1, r), device=device, dtype=dtype, generator=gen)
+        Q, _, _ = logSinkhorn(C_random, a, gQ, gamma, max_iter=max_iter,
+                              device=device, dtype=dtype, balanced=True, unbalanced=False)
+
+        # 2) R-generation
+        C_random = torch.rand((N2, r2), device=device, dtype=dtype, generator=gen)
+        R, _, _ = logSinkhorn(C_random, b, gR, gamma, max_iter=max_iter,
+                              device=device, dtype=dtype, balanced=True, unbalanced=False)
+
+        # 3) T-generation
         gR, gQ = R.T @ one_N2, Q.T @ one_N1
-        C_random = torch.rand((r,r2), device=device, dtype=dtype)
-        '''
-        xi_random = torch.exp( -C_random )
-        u, v = Sinkhorn(xi_random, gQ, gR, r, r2, gamma, device=device, max_iter=max_iter, dtype=dtype)
-        T = torch.diag(u) @ xi_random @ torch.diag(v)
-        '''
-        T,_,_ = logSinkhorn(C_random, gQ, gR, gamma, max_iter = max_iter, \
-                         device=device, dtype=dtype, balanced=True, unbalanced=False)
-        
-        # Use this to form the inner inverse coupling
+        C_random = torch.rand((r, r2), device=device, dtype=dtype, generator=gen)
+        T, _, _ = logSinkhorn(C_random, gQ, gR, gamma, max_iter=max_iter,
+                              device=device, dtype=dtype, balanced=True, unbalanced=False)
+
         if r == r2:
             Lambda = torch.linalg.inv(T)
         else:
             Lambda = torch.diag(1/gQ) @ T @ torch.diag(1/gR)
-            #also, could do: torch.diag(1/gQ) @ T @ torch.diag(1/gR)
+
     elif r == r2:
-        '''
-        Rank-2 initialization which requires equal inner ranks and gQ = gR = g.
-        This is adapted from "Low-Rank Sinkhorn Factorization" at https://arxiv.org/pdf/2103.04737
-        We advise setting full_rank = True and using the first initialization.
-        '''
         g = gQ
-        lambd = torch.min(torch.tensor([torch.min(a), torch.min(b), torch.min(g)])) / 2
+        lambd = torch.min(torch.tensor([torch.min(a), torch.min(b), torch.min(g)], device=device, dtype=dtype)) / 2
 
         if rank2_random:
-            # Take random sample from probability simplex
-            a1 = random_simplex_sample(N1, device=device, dtype=dtype)
-            b1 = random_simplex_sample(N2, device=device, dtype=dtype)
-            g1 = random_simplex_sample(r, device=device, dtype=dtype)
+            # ensure your random_simplex_sample accepts a generator too (see below)
+            a1 = random_simplex_sample(N1, device=device, dtype=dtype, generator=gen)
+            b1 = random_simplex_sample(N2, device=device, dtype=dtype, generator=gen)
+            g1 = random_simplex_sample(r,  device=device, dtype=dtype, generator=gen)
         else:
-            # or initialize exactly as in scetbon 21' ott-jax repo
-            g1 = torch.arange(1, r + 1, device=device, dtype=dtype)
-            g1 /= g1.sum()
-            a1 = torch.arange(1, N1 + 1, device=device, dtype=dtype)
-            a1 /= a1.sum()
-            b1 = torch.arange(1, N2 + 1, device=device, dtype=dtype)
-            b1 /= b1.sum()
-        
+            g1 = torch.arange(1, r + 1, device=device, dtype=dtype); g1 /= g1.sum()
+            a1 = torch.arange(1, N1 + 1, device=device, dtype=dtype); a1 /= a1.sum()
+            b1 = torch.arange(1, N2 + 1, device=device, dtype=dtype); b1 /= b1.sum()
+
         a2 = (a - lambd*a1)/(1 - lambd)
         b2 = (b - lambd*b1)/(1 - lambd)
         g2 = (g - lambd*g1)/(1 - lambd)
-        
-        # Generate Rank-2 Couplings
-        Q = lambd*torch.outer(a1, g1).to(device) + (1 - lambd)*torch.outer(a2, g2).to(device)
-        R = lambd*torch.outer(b1, g1).to(device) + (1 - lambd)*torch.outer(b2, g2).to(device)
-        
-        # This is already determined as g (but recomputed anyway)
-        gR, gQ = R.T @ one_N2, Q.T @ one_N1
-        
-        # Last term adds very tiny off-diagonal component for the non-diagonal LC-factorization (o/w the matrix stays fully diagonal)
-        T = (1-lambd)*torch.diag(g) + lambd*torch.outer(gR, gQ).to(device)
-        Lambda = torch.linalg.inv(T)
-    
-    return Q, R, T, Lambda
 
+        Q = lambd*torch.outer(a1, g1) + (1 - lambd)*torch.outer(a2, g2)
+        R = lambd*torch.outer(b1, g1) + (1 - lambd)*torch.outer(b2, g2)
+        Q, R = Q.to(device=device, dtype=dtype), R.to(device=device, dtype=dtype)
+
+        gR, gQ = R.T @ one_N2, Q.T @ one_N1
+        T = (1 - lambd)*torch.diag(g) + lambd*torch.outer(gR, gQ)
+        Lambda = torch.linalg.inv(T)
+
+    return Q, R, T, Lambda
 
 def k_means_initialization(x0, x1, r1, r2=None, \
                            a=None, b=None, gQ=None, gR=None, \

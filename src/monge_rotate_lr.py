@@ -39,9 +39,16 @@ def lr_cost(A, B, Q, R):
     RB = R.T @ B                                         # (r, k)
     return jnp.sum(jnp.sum(RB * SA, axis=1) / jnp.clip(g, 1e-18))
 
+def random_Q_init(n, r, random_state=None):
+    key = jax.random.PRNGKey(random_state if random_state is not None else 0)
+    Q = jnp.abs(jax.random.normal(key, (n, r)))
+    row_sums = jnp.sum(Q, axis=1, keepdims=True)
+    Q = Q / (n * row_sums)
+    return Q
+
 def stabilize_Q_init(Q, lambda_factor=0.5):
     n, r = Q.shape[0], Q.shape[1]
-    eps_Q = jnp.ones((n, r)) / (n * r)
+    eps_Q = random_Q_init(n, r, random_state=0)
     Q_init = (1 - lambda_factor) * Q + lambda_factor * eps_Q
     return Q_init
     
@@ -54,7 +61,7 @@ def loss_lr(Q, A, B):
 
 loss_lr_and_grad = jax.jit(jax.value_and_grad(loss_lr))
 
-def gkms_lr(A, B, Q_init, gamma=50.0, max_iter=100, tol=1e-9, min_iter=25):
+def gkms_lr(A, B, Q_init, gamma=20.0, max_iter=250, tol=1e-9, min_iter=250):
     
     n, r = Q_init.shape
     Q = Q_init
@@ -92,12 +99,15 @@ def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
     else:
         sA = sB = 1
         A, B = dist_util.compute_lr_sqeuclidean_factors(X, Y)
-    
+    '''
     # Lloyd init
     kmeans = KMeans(n_clusters=r, n_init=r, random_state=random_state)
     labels_X = kmeans.fit_predict(X)
-    labels_Y = kmeans.fit_predict(Y)
-
+    labels_Y = kmeans.fit_predict(Y)'''
+    
+    labels_X, centers_X = lloyds_kmeans(X, r, random_state=random_state)
+    labels_Y, centers_Y = lloyds_kmeans(Y, r, random_state=random_state)
+    
     # One-hot membership matrices on rows, scaled by 1/n
     Q1 = jnp.zeros((n, r)).at[jnp.arange(n), labels_X].set(1.0 / n)
     R2 = jnp.zeros((n, r)).at[jnp.arange(n), labels_Y].set(1.0 / n)
@@ -143,7 +153,7 @@ def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
             YB = jnp.asarray(Y)
         # returns list of (idxX, idxY) leaves
         frontier = HiRef_fast.hiref_lr_fast(
-            XA, YB, rank_schedule, iters_per_level=100, gamma=60.0,
+            XA, YB, rank_schedule, iters_per_level=300, gamma=60.0,
             rescale_cost=rescale, return_coupling=False
         )
         '''

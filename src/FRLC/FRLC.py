@@ -153,12 +153,16 @@ def FRLC_opt(C,
                                                 device=device, dtype=dtype, \
                                                     max_iter = max_inneriters_balanced)
         
-        Q, R, T = stabilize_Q_init(Q, device=device, dtype=dtype), stabilize_Q_init(R, device=device, dtype=dtype), stabilize_Q_init(T, device=device, dtype=dtype)
-        
+        Q = stabilize_Q_init(Q, device=device, dtype=dtype)
+        R = stabilize_Q_init(R, device=device, dtype=dtype)
+        T = stabilize_Q_init(T, device=device, dtype=dtype)
         Lambda = torch.diag(1/ (Q.T @ one_N1)) @ T @ torch.diag(1/ (R.T @ one_N2))
+        
     else:
         Q, R, T = init_args
-        Q, R, T = stabilize_Q_init(Q, device=device, dtype=dtype), stabilize_Q_init(R, device=device, dtype=dtype), stabilize_Q_init(T, device=device, dtype=dtype)
+        Q = stabilize_Q_init(Q, device=device, dtype=dtype)
+        R = stabilize_Q_init(R, device=device, dtype=dtype) 
+        T = stabilize_Q_init(T, device=device, dtype=dtype)
         Lambda = torch.diag(1/ (Q.T @ one_N1)) @ T @ torch.diag(1/ (R.T @ one_N2))
 
     if Wasserstein is False:
@@ -313,6 +317,183 @@ Optimization of FRLC supposing the distance matrices C, A, B have been factorize
 ----------
 '''
 
+def FRLC_LR_opt(
+    C_factors, A_factors, B_factors,
+    a=None, b=None,
+    tau_in=50, tau_out=50, gamma=90,
+    r=10, r2=None, max_iter=200,
+    device='cpu', dtype=torch.float64,
+    printCost=False, returnFull=False, alpha=0.0,
+    initialization='Full', init_args=None, full_grad=True,
+    convergence_criterion=True, tol=5e-6, min_iter=25,
+    max_inneriters_balanced=300, max_inneriters_relaxed=50,
+    diagonalize_return=False,
+    seed: int | None = None,
+    gen: torch.Generator | None = None,
+):
+    # ---------------- RNG added ----------------
+    if gen is None and seed is not None:
+        gen_cpu, gen_cuda = make_generators(seed, device)
+        gen = gen_cuda if device.startswith('cuda') else gen_cpu
+    
+    N1, N2 = C_factors[0].size(dim=0), C_factors[1].size(dim=1)
+    k = 0
+    stationarity_gap = torch.inf
+
+    one_N1 = torch.ones((N1,), device=device, dtype=dtype)
+    one_N2 = torch.ones((N2,), device=device, dtype=dtype)
+
+    if a is None: a = one_N1 / N1
+    if b is None: b = one_N2 / N2
+    if r2 is None: r2 = r
+
+    one_r  = torch.ones((r,),  device=device, dtype=dtype)
+    one_r2 = torch.ones((r2,), device=device, dtype=dtype)
+
+    gQ = (1/r)  * one_r
+    gR = (1/r2) * one_r2
+
+    if initialization == 'Full':
+        full_rank = True
+    elif initialization == 'Rank-2':
+        full_rank = False
+    else:
+        full_rank = True
+        print('Initialization must be either "Full" or "Rank-2", defaulting to "Full".')
+
+    if init_args is None:
+        Q, R, T, Lambda = util.initialize_couplings(
+            a, b, gQ, gR, gamma,
+            full_rank=full_rank, device=device, dtype=dtype,
+            max_iter=max_inneriters_balanced,
+            # pass gen through:
+            gen=gen
+        )
+        Q = stabilize_Q_init(Q, device=device, dtype=dtype)  # deterministic
+        R = stabilize_Q_init(R, device=device, dtype=dtype)
+        T = stabilize_Q_init(T, device=device, dtype=dtype)
+        Lambda = torch.diag(1/(Q.T @ one_N1)) @ T @ torch.diag(1/(R.T @ one_N2))
+    else:
+        Q, R, T = init_args
+        if Q is not None: gQ = Q.T @ one_N1
+        if R is not None: gR = R.T @ one_N2
+        if Q is None or R is None or T is None:
+            _Q, _R, _T, Lambda = util.initialize_couplings(
+                a, b, gQ, gR, gamma,
+                full_rank=full_rank, device=device, dtype=dtype,
+                max_iter=max_inneriters_balanced,
+                gen=gen
+            )
+            _Q = stabilize_Q_init(_Q, device=device, dtype=dtype)
+            _R = stabilize_Q_init(_R, device=device, dtype=dtype)
+            _T = stabilize_Q_init(_T, device=device, dtype=dtype)
+            if Q is None: Q = _Q
+            if R is None: R = _R
+            if T is None: T = _T
+        Lambda = torch.diag(1/(Q.T @ one_N1)) @ T @ torch.diag(1/(R.T @ one_N2))
+
+    errs = {'total_cost':[], 'W_cost':[], 'GW_cost': []}
+    grad = torch.inf
+    gamma_k = gamma
+    Q_prev, R_prev, T_prev = None, None, None
+
+    dual_1Q = dual_2Q = None
+    dual_1R = dual_2R = None
+    dual_1T = dual_2T = None
+
+    while (k < max_iter and (not convergence_criterion or
+           (k < min_iter or util.Delta((Q, R, T), (Q_prev, R_prev, T_prev), gamma_k) > tol))):
+
+        if convergence_criterion:
+            Q_prev, R_prev, T_prev = Q, R, T
+
+        if k % 25 == 0:
+            print(f'Iteration: {k}')
+
+        gradQ, gradR, gamma_k = gd.compute_grad_A_LR(
+            C_factors, A_factors, B_factors, Q, R, Lambda, gamma, device,
+            alpha=alpha, dtype=dtype, full_grad=full_grad
+        )
+
+        R, dual_1R, dual_2R = util.logSinkhorn(
+            gradR - (gamma_k**-1)*torch.log(R), b, gR, gamma_k,
+            max_iter=max_inneriters_relaxed,
+            device=device, dtype=dtype, balanced=False, unbalanced=False,
+            tau=tau_in, dual_1=dual_1R, dual_2=dual_2R
+        )
+
+        Q, dual_1Q, dual_2Q = util.logSinkhorn(
+            gradQ - (gamma_k**-1)*torch.log(Q), a, gQ, gamma_k,
+            max_iter=max_inneriters_relaxed,
+            device=device, dtype=dtype, balanced=False, unbalanced=False,
+            tau=tau_in, dual_1=dual_1Q, dual_2=dual_2Q
+        )
+
+        gQ, gR = Q.T @ one_N1, R.T @ one_N2
+
+        gradT, gamma_T = gd.compute_grad_B_LR(
+            C_factors, A_factors, B_factors, Q, R, Lambda, gQ, gR, gamma, device,
+            alpha=alpha, dtype=dtype
+        )
+
+        T, dual_1T, dual_2T = util.logSinkhorn(
+            gradT - (gamma_T**-1)*torch.log(T), gQ, gR, gamma_T,
+            max_iter=max_inneriters_balanced,
+            device=device, dtype=dtype, balanced=True, unbalanced=False,
+            dual_1=dual_1T, dual_2=dual_2T
+        )
+
+        Lambda = torch.diag(1/gQ) @ T @ torch.diag(1/gR)
+        k += 1
+
+        if printCost:
+            primal_cost = torch.trace(((Q.T @ C_factors[0]) @ (C_factors[1] @ R)) @ Lambda.T)
+
+            X = R @ ((Lambda.T @ ((Q.T @ A_factors[0]) @ (A_factors[1] @ Q)) @ Lambda) @ (R.T @ B_factors[0])) @ B_factors[1]
+            GW_cost = -2 * torch.trace(X)
+            del X
+
+            A1_tild, A2_tild = util.hadamard_square_lr(A_factors[0], A_factors[1].T, device=device)
+            GW_cost += torch.inner(A1_tild.T @ (Q @ one_r), A2_tild.T @ (Q @ one_r))
+            del A1_tild, A2_tild
+
+            B1_tild, B2_tild = util.hadamard_square_lr(B_factors[0], B_factors[1].T, device=device)
+            GW_cost += torch.inner(B1_tild.T @ (R @ one_r2), B2_tild.T @ (R @ one_r2))
+            del B1_tild, B2_tild
+
+            errs['W_cost'].append(primal_cost.detach().cpu())
+            errs['GW_cost'].append(GW_cost.detach().cpu())
+            errs['total_cost'].append(((1-alpha)*primal_cost + alpha*GW_cost).detach().cpu())
+
+    if printCost:
+        print(f"Initial Wasserstein cost: {errs['W_cost'][0]}, GW-cost: {errs['GW_cost'][0]}, Total cost: {errs['total_cost'][0]}")
+        print(f"Final Wasserstein cost: {errs['W_cost'][-1]}, GW-cost: {errs['GW_cost'][-1]}, Total cost: {errs['total_cost'][-1]}")
+        plt.plot(errs['total_cost']); plt.show()
+
+    if returnFull:
+        P = Q @ Lambda @ R.T
+        return P, errs
+    else:
+        if diagonalize_return:
+            Q = Q @ torch.diag(1 / gQ) @ T
+            gR = R.T @ one_N2
+            T = torch.diag(gR)
+        return Q, R, T, errs
+
+def stabilize_Q_init(Q, rand_perturb = False, 
+                     lambda_factor = 0.1, max_inneriters_balanced= 300, 
+                     device='cpu', dtype=torch.float64):
+    # Add a small random or trivial outer product perturbation to ensure stability of one-hot encoded Q
+    N2, r2 = Q.shape[0], Q.shape[1]
+    b, gQ = torch.sum(Q, axis = 1), torch.sum(Q, axis = 0)
+    eps_Q = torch.outer(b, gQ).to(device).type(dtype)
+    
+    # Yield perturbation, return
+    Q_init = ( 1 - lambda_factor ) * Q + lambda_factor * eps_Q
+    
+    return Q_init
+
+'''
 def FRLC_LR_opt(C_factors, 
                 A_factors, 
                 B_factors, 
@@ -326,7 +507,7 @@ def FRLC_LR_opt(C_factors,
                 max_iter=200, 
                 device='cpu', 
                 dtype=torch.float64,
-                printCost=True, 
+                printCost=False, 
                 returnFull=False, 
                 alpha=0.0, 
                 initialization='Full', 
@@ -338,66 +519,6 @@ def FRLC_LR_opt(C_factors,
                 max_inneriters_balanced= 300, 
                 max_inneriters_relaxed=50, 
                 diagonalize_return=False):
-    
-    '''
-    FRLC with a low-rank factorization of the distance matrices (C, A, B) assumed.
-    
-    *** Currently only implements balanced OT ***
-    
-    ------Parameters------
-    C_factors: tuple of torch.tensor (n x d, d x m)
-        A tuple of two tensors representing the factors of C (Wasserstein term).
-    A_factors: tuple of torch.tensor (n x d, d x n)
-        A tuple of the A factors (GW term).
-    B_factors: torch.tensor
-        A tuple of the B factors (GW term).
-    a: torch.tensor, optional (default=None)
-        A vector representing marginal one.
-    b: torch.tensor, optional (default=None)
-        A vector representing marginal two.
-    tau_in: float, optional (default=0.0001)
-        The inner marginal regularization parameter.
-    tau_out: float, optional (default=75)
-        The outer marginal regularization parameter.
-    gamma: float, optional (default=90)
-        Mirror descent step size.
-    r: int, optional (default=10)
-        A parameter representing a rank or dimension.
-    r2: int, optional (default=None)
-        A secondary rank parameter (if None, defaults to square latent coupling)
-    max_iter: int, optional (default=200)
-        The maximum number of iterations.
-    device: str, optional (default='cpu')
-        The device to run the computation on ('cpu' or 'cuda').
-    dtype: torch.dtype, optional (default=torch.float64)
-        The data type of the tensors.
-    printCost: bool, optional (default=True)
-        Whether to print and plot the cost during computation.
-    returnFull: bool, optional (default=False)
-        Whether to return the full coupling P. If False, returns (Q,R,T)
-    alpha: float, optional (default=0.2)
-        A parameter controlling weight to Wasserstein (alpha = 0.0) or GW (alpha = 1.0) terms
-    initialization: str, optional (default='Full')
-        'Full' if sub-couplings initialized to be full-rank, if 'Rank-2' set to a rank-2 initialization.
-        We advise setting this to be 'Full'.
-    init_args: dict, optional (default=None)
-        Arguments for the initialization method.
-    full_grad: bool, optional (default=True)
-        If True, evaluates gradient with rank-1 perturbations. Else if False, omits perturbation terms.
-    convergence_criterion: bool, optional (default=True)
-        If True, use the convergence criterion. Else if False, default to running up to max_iters.
-    tol: float, optional (default=5e-6)
-        The tolerance for convergence.
-    min_iter: int, optional (default=25)
-        The minimum number of iterations.
-    max_inneriters_balanced: int, optional (default=300)
-        The maximum number of inner iterations for balanced OT sub-routines.
-    max_inneriters_relaxed: int, optional (default=50)
-        The maximum number of inner iterations for relaxed OT sub-routines.
-    diagonalize_return: bool, optional (default=False)
-         If True, diagonalize the LC-factorization to the form of Scetbon et al '21.
-        Else if False, return the LC-factorization.
-    '''
     
     N1, N2 = C_factors[0].size(dim=0), C_factors[1].size(dim=1)
     k = 0
@@ -460,9 +581,6 @@ def FRLC_LR_opt(C_factors,
         
         Lambda = torch.diag(1/ (Q.T @ one_N1)) @ T @ torch.diag(1/ (R.T @ one_N2))
     
-    '''
-    Preparing main loop.
-    '''
     errs = {'total_cost':[], 'W_cost':[], 'GW_cost': []}
     grad = torch.inf
     gamma_k = gamma
@@ -532,32 +650,9 @@ def FRLC_LR_opt(C_factors,
         return P, errs
     else:
         if diagonalize_return:
-            '''
-            Diagonalize return to factorization of Scetbon '21
-            '''
             Q = Q @ torch.diag(1 / gQ) @ T
             gR = R.T @ one_N2
             T = torch.diag(gR)
         return Q, R, T, errs
 
-
-
-def stabilize_Q_init(Q, rand_perturb = False, 
-                     lambda_factor = 0.1, max_inneriters_balanced= 300, 
-                     device='cpu', dtype=torch.float64):
-    """
-    Initial condition Q (e.g. from annotation, if doing a warm-start) will not optimize if one-hot.
-                ---e.g. if most of Q_t is sparse/a clustering, logQ_t = - inf which is unstable!
-    
-    Perturb to ensure there is non-zero mass everywhere.
-    """
-    # Add a small random or trivial outer product perturbation to ensure stability of one-hot encoded Q
-    N2, r2 = Q.shape[0], Q.shape[1]
-    b, gQ = torch.sum(Q, axis = 1), torch.sum(Q, axis = 0)
-    eps_Q = torch.outer(b, gQ).to(device).type(dtype)
-    
-    # Yield perturbation, return
-    Q_init = ( 1 - lambda_factor ) * Q + lambda_factor * eps_Q
-    
-    return Q_init
-
+'''

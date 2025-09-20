@@ -3,103 +3,120 @@ from sklearn.metrics import adjusted_mutual_info_score as AMI
 from sklearn.metrics import adjusted_rand_score as ARI
 from scipy.optimize import linear_sum_assignment
 
-def evaluate_factors(Q: np.ndarray,
-                     R: np.ndarray,
-                     yA: np.ndarray,
-                     yB: np.ndarray,
-                     classes: np.ndarray | None = None):
+def evaluate_factors(
+    Q: np.ndarray,
+    R: np.ndarray,
+    yA: np.ndarray,
+    yB: np.ndarray,
+    g: np.ndarray | None = None,
+    classes: np.ndarray | None = None,
+    *,
+    return_matrix: bool = False,
+    include_purity: bool = False,
+    eps: float = 1e-18,
+):
     """
-    Evaluate clustering quality directly from factor memberships Q (X-side) and R (Y-side).
-
-    Args
-    ----
-    Q : (n, r) nonnegative, row-stochastic or approximately so.
-    R : (n, r) same for Y-side.
-    yA: (n,) ground-truth class labels for X.
-    yB: (n,) ground-truth class labels for Y.
-    classes: optional array of unique class ids (shared label set). If None, inferred.
+    Minimal evaluation for low-rank OT factors.
 
     Returns
     -------
-    dict with:
-      - 'A_AMI', 'A_ARI': AMI/ARI(yA, argmax(Q))
-      - 'B_AMI', 'B_ARI': AMI/ARI(yB, argmax(R))
-      - 'A_class_mass_accuracy', 'B_class_mass_accuracy': soft majority-mass fractions
-      - 'A_cluster_majority', 'B_cluster_majority': majority class per cluster (length r)
-      - 'shared_class_set_match': fraction overlap of majority-class sets (naive check)
-      - 'best_cluster_label_alignment_acc': best matching accuracy between A/B cluster labels
-        under Hungarian (when r is reasonably comparable on both sides)
-      - 'A_class_cluster_matrix', 'B_class_cluster_matrix': soft mass tables (kC x r)
+    dict with keys:
+      - 'A_AMI', 'A_ARI' : AMI/ARI between yA and argmax(Q)
+      - 'B_AMI', 'B_ARI' : AMI/ARI between yB and argmax(R)
+      - 'CMA'            : cross-domain class-mass accuracy:
+                           tr( A_CC diag(1/g) B_CC^T ) / sum(A_CC diag(1/g) B_CC^T)
+      - 'classes'        : the class ids used to build the matrix
+      - optionally (if flags set):
+          * 'A_cluster_purity', 'B_cluster_purity' (if include_purity=True)
+          * 'class_mass_matrix' (if return_matrix=True)
+    Notes
+    -----
+    - Q, R are (n, r) soft memberships (nonnegative). g is (r,) (positive).
+    - If g is None, assumes uniform g = 1/r.
+    - classes defines the shared label set ordering. If None, inferred from yA∪yB.
     """
-    yA = np.asarray(yA)
-    yB = np.asarray(yB)
+    Q = np.asarray(Q); R = np.asarray(R)
+    n, r = Q.shape
+    assert R.shape == (n, r), "Q and R must have shape (n, r)"
 
+    yA = np.asarray(yA); yB = np.asarray(yB)
     if classes is None:
         classes = np.unique(np.concatenate([yA, yB]))
     classes = np.asarray(classes)
-    kC = len(classes)
-    class_to_idx = {c: k for k, c in enumerate(classes)}
+    kC = int(classes.size)
 
-    n, r = Q.shape
-    assert R.shape[0] == n and R.shape[1] == r, "Q and R must have matching shapes (n,r)."
-
-    # Hard assignments via argmax
+    # Hard labels from soft memberships
     zA = Q.argmax(axis=1)
     zB = R.argmax(axis=1)
 
-    # External clustering metrics (label vs cluster-id)
-    A_AMI = float(AMI(yA, zA))
-    A_ARI = float(ARI(yA, zA))
-    B_AMI = float(AMI(yB, zB))
-    B_ARI = float(ARI(yB, zB))
-
-    # Soft class-by-cluster mass tables
-    A_CC = np.zeros((kC, r), dtype=np.float64)
-    B_CC = np.zeros((kC, r), dtype=np.float64)
-    for i in range(n):
-        A_CC[class_to_idx[yA[i]]] += Q[i]   # add row Q[i,:] to that class
-        B_CC[class_to_idx[yB[i]]] += R[i]
-
-    # Majority class per cluster (per side)
-    A_cluster_majority_idx = A_CC.argmax(axis=0)  # (r,)
-    B_cluster_majority_idx = B_CC.argmax(axis=0)  # (r,)
-    A_cluster_majority = classes[A_cluster_majority_idx]
-    B_cluster_majority = classes[B_cluster_majority_idx]
-
-    # Soft "class-mass accuracy": total mass sitting in majority class of each cluster
-    # Normalize by total mass (sum of Q) to get a fraction in [0,1].
-    A_majority_mass = A_CC.max(axis=0).sum()
-    B_majority_mass = B_CC.max(axis=0).sum()
-    # Totals: if rows are normalized to 1/n, sum(Q)=1; else compute explicitly
-    A_total_mass = Q.sum()
-    B_total_mass = R.sum()
-    A_class_mass_accuracy = float(A_majority_mass / (A_total_mass + 1e-12))
-    B_class_mass_accuracy = float(B_majority_mass / (B_total_mass + 1e-12))
-
-    # Do A-clusters' majority labels "match" B-clusters' majority labels?
-    # 1) simple set overlap ratio
-    overlap = len(set(A_cluster_majority.tolist()) & set(B_cluster_majority.tolist()))
-    shared_class_set_match = float(overlap / max(1, len(set(classes))))
-
-    # 2) best one-to-one alignment of clusters by majority-label agreement (Hungarian)
-    #    Build an r x r score matrix: 1 if labels match, else 0.
-    S = (A_cluster_majority[:, None] == B_cluster_majority[None, :]).astype(np.float64)
-    # Maximize matches ⇒ minimize -S
-    row_ind, col_ind = linear_sum_assignment(-S)
-    best_cluster_label_alignment_acc = float(S[row_ind, col_ind].sum() / r)
-
-    return {
-        "A_AMI": A_AMI,
-        "A_ARI": A_ARI,
-        "B_AMI": B_AMI,
-        "B_ARI": B_ARI,
-        "A_class_mass_accuracy": A_class_mass_accuracy,
-        "B_class_mass_accuracy": B_class_mass_accuracy,
-        "A_cluster_majority": A_cluster_majority,
-        "B_cluster_majority": B_cluster_majority,
-        "shared_class_set_match": shared_class_set_match,
-        "best_cluster_label_alignment_acc": best_cluster_label_alignment_acc,
-        "A_class_cluster_matrix": A_CC,
-        "B_class_cluster_matrix": B_CC,
+    out = {
+        "A_AMI": float(AMI(yA, zA)),
+        "A_ARI": float(ARI(yA, zA)),
+        "B_AMI": float(AMI(yB, zB)),
+        "B_ARI": float(ARI(yB, zB)),
         "classes": classes,
     }
+
+    # Build class–cluster tables via one-hot * matmul
+    # Map raw labels into [0..kC-1] indices consistent with `classes`
+    lab2idx = {c: i for i, c in enumerate(classes)}
+    yA_idx = np.vectorize(lab2idx.get)(yA)
+    yB_idx = np.vectorize(lab2idx.get)(yB)
+
+    Qbar = _one_hot(yA_idx, kC, dtype=Q.dtype)   # (n,kC)
+    Rbar = _one_hot(yB_idx, kC, dtype=R.dtype)   # (n,kC)
+
+    A_CC = Qbar.T @ Q                             # (kC, r)
+    B_CC = Rbar.T @ R                             # (kC, r)
+
+    # Proper cross-domain CMA from LR factors
+    if g is None:
+        g = np.full((r,), 1.0 / r, dtype=Q.dtype)
+    g = np.asarray(g, dtype=Q.dtype)
+    inv_g = 1.0 / np.maximum(g, eps)              # (r,)
+
+    # Class–class mass matrix: M = A_CC diag(1/g) B_CC^T
+    M = A_CC @ (inv_g[None, :] * B_CC.T)          # (kC, kC)
+    total_mass = M.sum()
+    CMA = float(np.trace(M) / (total_mass + eps))
+    out["CMA"] = CMA
+
+    if include_purity:
+        # Per-side cluster purity (majority mass fraction) — optional
+        A_purity = float(A_CC.max(axis=0).sum() / (Q.sum() + eps))
+        B_purity = float(B_CC.max(axis=0).sum() / (R.sum() + eps))
+        out["A_cluster_purity"] = A_purity
+        out["B_cluster_purity"] = B_purity
+
+    if return_matrix:
+        out["class_mass_matrix"] = M
+
+    return out
+
+def _one_hot(labels, num_classes=None, dtype=np.float64):
+    y = np.asarray(labels)
+    if num_classes is None:
+        num_classes = int(y.max()) + 1
+    Q = np.zeros((y.shape[0], num_classes), dtype=dtype)
+    Q[np.arange(y.shape[0]), y.astype(int)] = 1.0
+    return Q
+
+def to_np(x, dtype=np.float64):
+    if x is None:
+        return None
+    try:
+        import jax.numpy as jnp
+        if isinstance(x, jnp.ndarray):
+            x = np.array(x)
+    except Exception:
+        pass
+    try:
+        import torch
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().numpy()
+    except Exception:
+        pass
+    x = np.asarray(x, dtype=dtype)
+    return x
+
+
