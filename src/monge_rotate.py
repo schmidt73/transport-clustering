@@ -22,9 +22,9 @@ def monge_permutation(C):
     n = C.shape[0]
     a = jnp.ones(n) / n
     b = jnp.ones(n) / n
-    geom = geometry.Geometry(cost_matrix=C, epsilon=1e-4)
+    geom = geometry.Geometry(cost_matrix=C, epsilon=1e-5)
     problem = linear_problem.LinearProblem(geom, a=a, b=b)
-    solver = sinkhorn.Sinkhorn()
+    solver = sinkhorn.Sinkhorn(max_iterations=10000)
     solution = solver(problem)
     P_soft = solution.matrix
     return P_soft
@@ -155,7 +155,7 @@ def save_loss_plot(losses, filename):
 
 def monge_conjugate(
     C, r, X=None, Y=None, random_state=0, bm_init=False, kmeans_init=False, 
-    rescale_gamma=True, gamma_init=20, max_iter=500, lambda_factor=0.5, 
+    rescale_gamma=True, gamma_init=2.0, max_iter=2500, lambda_factor=0.5, 
     log_domain=True, debug=False
 ):
     n = C.shape[0]
