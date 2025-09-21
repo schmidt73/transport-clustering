@@ -184,52 +184,6 @@ def stratified_equal_halves(labels: np.ndarray, seed: int = 42):
     assert len(A_idx) == len(B_idx)
     return A_idx, B_idx
 
-def evaluate_plan(P: np.ndarray, yA: np.ndarray, yB: np.ndarray) -> Dict:
-    yA = np.asarray(yA)
-    yB = np.asarray(yB)
-    classes = np.unique(np.concatenate([yA, yB]))
-    class_to_idx = {c: k for k, c in enumerate(classes)}
-    kC = len(classes)
-
-    M = np.zeros((kC, kC), dtype=np.float64)
-    for i, ci in enumerate(yA):
-        row = P[i]
-        for j, cj in enumerate(yB):
-            M[class_to_idx[ci], class_to_idx[cj]] += row[j]
-
-    total_mass = P.sum()
-    class_mass_accuracy = float(np.trace(M) / (total_mass + 1e-12))
-
-    predA = np.empty_like(yA)
-    for i, _ in enumerate(yA):
-        mass_per_class = np.zeros(kC, dtype=np.float64)
-        for j, cj in enumerate(yB):
-            mass_per_class[class_to_idx[cj]] += P[i, j]
-        predA[i] = classes[mass_per_class.argmax()]
-
-    predB = np.empty_like(yB)
-    for j, _ in enumerate(yB):
-        mass_per_class = np.zeros(kC, dtype=np.float64)
-        for i, ci in enumerate(yA):
-            mass_per_class[class_to_idx[ci]] += P[i, j]
-        predB[j] = classes[mass_per_class.argmax()]
-
-    x_AMI = float(AMI(yA, predA))
-    x_ARI = float(ARI(yA, predA))
-    y_AMI = float(AMI(yB, predB))
-    y_ARI = float(ARI(yB, predB))
-
-    return {
-        "class_mass_accuracy": class_mass_accuracy,
-        "x_AMI": x_AMI,
-        "x_ARI": x_ARI,
-        "y_AMI": y_AMI,
-        "y_ARI": y_ARI,
-        "class_mass_matrix": M,
-        "classes": classes,
-    }
-
-
 import os, time, numpy as np
 import jax, jax.numpy as jnp
 import torch
@@ -322,8 +276,7 @@ def compute_lr_sqeuclidean_factors(X_s: jnp.ndarray,
             return A, B, sA, sB
     return A, B
 
-# ---------- HiRef / Monge-rotation K-Means (your code) ----------
-# expects a function like: mr_lr.monge_rotation_kmeans_LR(X, Y, rank, lambda_factor, random_state, epsilon, ot_solver)
+# ---------- HiRef / Monge-rotation K-Means ----------
 def run_monge_conj(XA, YB, rank, ot_solver="HiRef"):
     import monge_rotate_lr as mr_lr
     np_dtype = np.float32  # or float64 if you keep x64
@@ -350,7 +303,7 @@ def run_monge_conj(XA, YB, rank, ot_solver="HiRef"):
     }
     return (Q, R, g), res
 
-# ---------- FRLC (your module) ----------
+# ---------- FRLC ----------
 def run_frlc(g1, g2, X=None, Y=None, C=None, rank=64, device=None, dtype=None):
     import FRLC.FRLC as frlc
     device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
@@ -619,4 +572,51 @@ def lowrank_monge_adapter(XA: np.ndarray, YB: np.ndarray,
     cost = _loss_lr_two(Q, R, A, B, g)
     
     return (Q, R, g), cost
+'''
+
+'''
+def evaluate_plan(P: np.ndarray, yA: np.ndarray, yB: np.ndarray) -> Dict:
+    yA = np.asarray(yA)
+    yB = np.asarray(yB)
+    classes = np.unique(np.concatenate([yA, yB]))
+    class_to_idx = {c: k for k, c in enumerate(classes)}
+    kC = len(classes)
+
+    M = np.zeros((kC, kC), dtype=np.float64)
+    for i, ci in enumerate(yA):
+        row = P[i]
+        for j, cj in enumerate(yB):
+            M[class_to_idx[ci], class_to_idx[cj]] += row[j]
+
+    total_mass = P.sum()
+    class_mass_accuracy = float(np.trace(M) / (total_mass + 1e-12))
+
+    predA = np.empty_like(yA)
+    for i, _ in enumerate(yA):
+        mass_per_class = np.zeros(kC, dtype=np.float64)
+        for j, cj in enumerate(yB):
+            mass_per_class[class_to_idx[cj]] += P[i, j]
+        predA[i] = classes[mass_per_class.argmax()]
+
+    predB = np.empty_like(yB)
+    for j, _ in enumerate(yB):
+        mass_per_class = np.zeros(kC, dtype=np.float64)
+        for i, ci in enumerate(yA):
+            mass_per_class[class_to_idx[ci]] += P[i, j]
+        predB[j] = classes[mass_per_class.argmax()]
+
+    x_AMI = float(AMI(yA, predA))
+    x_ARI = float(ARI(yA, predA))
+    y_AMI = float(AMI(yB, predB))
+    y_ARI = float(ARI(yB, predB))
+
+    return {
+        "class_mass_accuracy": class_mass_accuracy,
+        "x_AMI": x_AMI,
+        "x_ARI": x_ARI,
+        "y_AMI": y_AMI,
+        "y_ARI": y_ARI,
+        "class_mass_matrix": M,
+        "classes": classes,
+    }
 '''
