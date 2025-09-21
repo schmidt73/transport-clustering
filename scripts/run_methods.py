@@ -28,6 +28,7 @@ sys.path.append("../src")
 
 import monge_rotate as mr
 import FRLC.FRLC as frlc
+import LatentOT as latentot
 
 def visualize_transport_matrix(P, algorithm, primal_cost, rank, show=True):
     P_np = P if isinstance(P, np.ndarray) else np.array(P)
@@ -223,6 +224,50 @@ def run_lot(
 
     return ot_lr.q, ot_lr.g, ot_lr.r, res
 
+def run_latent_ot_lin(
+    seed: int,
+    g1: jnp.ndarray, 
+    g2: jnp.ndarray, 
+    X: jnp.ndarray, 
+    Y: jnp.ndarray 
+    ):
+    """Run the Lin et al. 2021 algorithm."""
+
+    rng = jax.random.PRNGKey(seed if seed is not None else 0)
+    start_time = time.time()
+    lot = latentot.LOT(n_source_anchors=rank, n_target_anchors=rank)
+    lot.fit(X, Y)
+    transported_features_lot = lot.transport(X, Y)
+    end_time = time.time()
+    solve_time = end_time - start_time
+
+    Q, T, R = lot.Px_, lot.Pz_, lot.Py_
+    P = Q @ jnp.diag(1 / Q.sum(axis=0)) @ T @ jnp.diag(1 / R.sum(axis=1)) @ R
+    P = sinkhorn_rescaling(P, g1, g2, max_iter=3000, tol=1e-5) # round all solutions to be 1e-5 feasible
+
+    primal_cost = compute_sqeuc_cost_matrix(X, Y) * P
+    primal_cost = jnp.sum(primal_cost)
+    logger.info(f"Lin et al. objective: {primal_cost}")
+    
+    l1_row_error = jnp.sum(jnp.abs(g1  - P.sum(axis=0)))
+    l1_col_error = jnp.sum(jnp.abs(g2  - P.sum(axis=1)))
+    l1_error     = jnp.sum(jnp.abs(1.0 - P.sum()))
+
+    res = {
+        "objective_cost": float(primal_cost),
+        "lower_bound": None,
+        "rank": rank,
+        "simulation_seed": args.seed,
+        "num_restart": 0,
+        "algorithm": args.algorithm,
+        "l1_row_marginal_error": float(l1_row_error),
+        "l1_col_marginal_error": float(l1_col_error),
+        "l1_total_error": float(l1_error),
+        "runtime": solve_time
+    }
+
+    return Q, Q.sum(axis=0), (T @ jnp.diag(1 / R.sum(axis=1)) @ R).T, res
+
 def parse_args():
     parser = ap.ArgumentParser()
     input_group = parser.add_mutually_exclusive_group(required=True)
@@ -232,7 +277,7 @@ def parse_args():
     parser.add_argument("-r", "--rank", type=int, default=5)
     parser.add_argument("-s", "--seed", type=int, default=0)
     parser.add_argument("-o", "--output", type=str, default="algorithm")
-    parser.add_argument("-a", "--algorithm", default="clrot", choices=["mr", "frlc", "lot"])
+    parser.add_argument("-a", "--algorithm", default="clrot", choices=["mr", "frlc", "lot", "lin"])
     parser.add_argument("--restarts", type=int, default=10)
     parser.add_argument("--visualize", action="store_true", help="Visualize transport matrix.")
     return parser.parse_args()
@@ -271,15 +316,17 @@ if __name__ == "__main__":
         Q, g, R, result = run_frlc(args.seed, g1, g2, X, Y, C, device=torch_device, dtype=torch_dtype)
     elif args.algorithm == "lot":
         Q, g, R, result = run_lot(args.seed, g1, g2, X, Y, C)
+    elif args.algorithm == "lin":
+        Q, g, R, result = run_latent_ot_lin(args.seed, g1, g2, X, Y)
 
     P = jnp.array(Q @ jnp.diag(1.0 / g) @ R.T)
     if args.visualize:
         visualize_transport_matrix(P, args.algorithm, result["objective_cost"], rank)
     
     if args.output:
-        with open(args.output + "_results.json", "w") as f:
+        with open(args.output + "_summary.json", "w") as f:
             json.dump(result, f)
-        logger.info(f"Saved summary of results to {args.output}_results.json")
+        logger.info(f"Saved summary of results to {args.output}_summary.json")
         np.savetxt(args.output + "_Q.txt", Q)
         np.savetxt(args.output + "_g.txt", g)
         np.savetxt(args.output + "_R.txt", R)
