@@ -61,33 +61,34 @@ def loss_lr(Q, A, B):
 
 loss_lr_and_grad = jax.jit(jax.value_and_grad(loss_lr))
 
+def _step(Q, A, B, gamma):
+    val, grad = loss_lr_and_grad(Q, A, B)
+    Qn = Q * jnp.exp(-gamma * grad) # Exponential gradient step
+    '''
+    row_scaling_vector = jnp.sum(Qn, axis=1)
+    Qn = jnp.diag(1 / (n * row_scaling_vector)) @ Qn # Diagonal projection of the positive kernel
+    '''
+    Qn = Qn * (1.0 / (Qn.sum(axis=1, keepdims=True) * Q.shape[0]))
+    return val, Qn
+
+_step = jax.jit(_step, donate_argnums=(0,))
+
 def gkms_lr(A, B, Q_init, gamma=20.0, max_iter=250, tol=1e-9, min_iter=250):
-    
-    n, r = Q_init.shape
     Q = Q_init
-    
-    @jax.jit
-    def step(Q):
-        val, grad = loss_lr_and_grad(Q, A, B)
-        Qn = Q * jnp.exp(-gamma * grad) # Exponential gradient step
-        row_scaling_vector = jnp.sum(Qn, axis=1)
-        Qn = jnp.diag(1 / (n * row_scaling_vector)) @ Qn # Diagonal projection of the positive kernel
-        return val, Qn
-    
     last = None
-    
     for k in range(max_iter):
-        val, Q = step(Q)
+        val, Q = _step(Q, A, B, gamma)
         if k >= max(2, min_iter) and last is not None and jnp.abs(val - last) <= tol:
             break
         last = val
-    
     g = jnp.sum(Q, axis=0)
     return Q, g
 
 def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
                              random_state=0, epsilon=1e-2, 
-                             ot_solver='HiRef', rescale=True): #'HiRef'
+                             ot_solver='HiRef', rescale=True, 
+                             init='default', hiref_iters=300,
+                             hiref_max_Q=1000, hiref_max_rank=100):
     """
     Low-rank Monge-rotation k-means initializer + GKMS.
     Avoids forming C; rotates LR factors A,B and (Q1,R2) via P or via a permutation from HiRef.
@@ -99,19 +100,23 @@ def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
     else:
         sA = sB = 1
         A, B = dist_util.compute_lr_sqeuclidean_factors(X, Y)
-    '''
-    # Lloyd init
-    kmeans = KMeans(n_clusters=r, n_init=r, random_state=random_state)
-    labels_X = kmeans.fit_predict(X)
-    labels_Y = kmeans.fit_predict(Y)'''
     
-    labels_X, centers_X = lloyds_kmeans(X, r, random_state=random_state)
-    labels_Y, centers_Y = lloyds_kmeans(Y, r, random_state=random_state)
+    if init == 'sklearn':
+        # init via sklearn
+        kmeans = KMeans(n_clusters=r, n_init=r, random_state=random_state)
+        labels_X = kmeans.fit_predict(X)
+        labels_Y = kmeans.fit_predict(Y)
+        # One-hot membership matrices on rows, scaled by 1/n
+        Q1 = jnp.zeros((n, r)).at[jnp.arange(n), labels_X].set(1.0 / n)
+        R2 = jnp.zeros((n, r)).at[jnp.arange(n), labels_Y].set(1.0 / n)
+    else:
+        # homemade Lloyd + kmpp
+        labels_X, centers_X = lloyds_kmeans(X, r, random_state=random_state)
+        labels_Y, centers_Y = lloyds_kmeans(Y, r, random_state=random_state)
+        # One-hot membership matrices on rows, scaled by 1/n
+        Q1 = jnp.zeros((n, r)).at[jnp.arange(n), labels_X].set(1.0 / n)
+        R2 = jnp.zeros((n, r)).at[jnp.arange(n), labels_Y].set(1.0 / n)
     
-    # One-hot membership matrices on rows, scaled by 1/n
-    Q1 = jnp.zeros((n, r)).at[jnp.arange(n), labels_X].set(1.0 / n)
-    R2 = jnp.zeros((n, r)).at[jnp.arange(n), labels_Y].set(1.0 / n)
-
     # Compute Monge “rotation”
     if ot_solver == 'Sinkhorn':
         # soft plan (dense); keep matmuls
@@ -146,14 +151,15 @@ def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
     elif ot_solver == 'HiRef':
         # permutation-like output (sparse); replace matmuls with indexing
         rank_schedule = rank_annealing.optimal_rank_schedule(
-            n, hierarchy_depth=6, max_Q=1000, max_rank=100
+            n, hierarchy_depth=6, 
+            max_Q=hiref_max_Q, max_rank=hiref_max_rank
         )
         with jax.default_device(jax.devices("gpu")[0]):
             XA = jnp.asarray(X)
             YB = jnp.asarray(Y)
         # returns list of (idxX, idxY) leaves
         frontier = HiRef_fast.hiref_lr_fast(
-            XA, YB, rank_schedule, iters_per_level=300, gamma=60.0,
+            XA, YB, rank_schedule, iters_per_level=hiref_iters, gamma=60.0,
             rescale_cost=rescale, return_coupling=False
         )
         '''

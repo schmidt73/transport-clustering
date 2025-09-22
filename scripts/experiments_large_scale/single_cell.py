@@ -5,25 +5,115 @@ import scanpy as sc
 import run_LowRank
 import eval_LowRank
 import torch
+import os
+import gc
+import jax
+import os
+import numpy as np
+import scanpy as sc
 
+def extract_pair(
+    subset_adata,
+    t1,
+    t2,
+    label_col="celltype_update",
+    use_pca=True,
+    pca_key="X_pca",
+    n_comps=20,
+    pca_cache_path=None,   # e.g. "/scratch/.../pca_E8.5-E8.75.npz" (or per-file cache)
+    overwrite_cache=False
+):
+    """
+    Minimal PCA save/load inline:
+      - If pca_cache_path is provided and exists, load PCA from it.
+      - Else, compute PCA on 'subset_adata', save to pca_cache_path (if provided).
+      - Then slice rows for timepoints t1 and t2 and return (XA, YB, yA, yB).
+
+    The cache file stores:
+      - 'cell_ids': np.ndarray of ad.obs_names (str)
+      - 'X_pca':    np.ndarray of shape (n_cells, n_comps), float32
+    """
+    ad = subset_adata  # already in-memory
+    assert label_col in ad.obs, f"Missing label column: {label_col}"
+
+    if not use_pca:
+        # No PCA path: just slice raw X and return
+        A = ad[ad.obs["day"] == t1]
+        B = ad[ad.obs["day"] == t2]
+        XA = A.X
+        YB = B.X
+        yA = np.asarray(A.obs[label_col])
+        yB = np.asarray(B.obs[label_col])
+        return XA, YB, yA, yB
+
+    # --- PCA: load-or-build cache ---
+    X_pca_all = None
+    cell_ids_all = None
+    if pca_cache_path and (os.path.exists(pca_cache_path) and not overwrite_cache):
+        cache = np.load(pca_cache_path, allow_pickle=False)
+        cell_ids_all = cache["cell_ids"]
+        X_pca_all = cache["X_pca"]
+    else:
+        # Compute PCA (fast randomized solver), then optionally save
+        # NOTE: do not mutate original .obsm/.X on disk; compute fresh each time here
+        ad_local = ad.copy()  # keep subset_adata pristine if needed elsewhere
+        sc.pp.normalize_total(ad_local, target_sum=1e4)
+        sc.pp.log1p(ad_local)
+        sc.tl.pca(ad_local, n_comps=n_comps, svd_solver="randomized")
+
+        X_pca_all = ad_local.obsm.get(pca_key, None)
+        if X_pca_all is None:
+            # fallback: Scanpy always stores as "X_pca"
+            X_pca_all = ad_local.obsm["X_pca"]
+        X_pca_all = np.asarray(X_pca_all, dtype=np.float32)
+
+        cell_ids_all = ad_local.obs_names.to_numpy().astype("U")
+
+        if pca_cache_path:
+            os.makedirs(os.path.dirname(pca_cache_path), exist_ok=True)
+            np.savez_compressed(pca_cache_path, cell_ids=cell_ids_all, X_pca=X_pca_all)
+
+    # --- Slice rows for t1/t2 by cell_id (order-safe) ---
+    obs = ad.obs
+    idxA = (obs["day"] == t1).to_numpy().nonzero()[0]
+    idxB = (obs["day"] == t2).to_numpy().nonzero()[0]
+    cids_A = obs.index.values[idxA]
+    cids_B = obs.index.values[idxB]
+
+    # Build a quick id->row map (O(n)); for many pairs in the same subset, you can hoist this out
+    id_to_row = {cid: i for i, cid in enumerate(cell_ids_all)}
+
+    rowsA = np.fromiter((id_to_row[c] for c in cids_A), count=len(cids_A), dtype=int)
+    rowsB = np.fromiter((id_to_row[c] for c in cids_B), count=len(cids_B), dtype=int)
+
+    XA = X_pca_all[rowsA]
+    YB = X_pca_all[rowsB]
+    yA = np.asarray(obs.loc[cids_A, label_col].values)
+    yB = np.asarray(obs.loc[cids_B, label_col].values)
+
+    return XA, YB, yA, yB
+
+'''
 # --- Choose A/B from subset_adata (two timepoints, two replicates already selected) ---
-def extract_pair(subset_adata, t1, t2, label_col="celltype_update", use_pca=True, pca_key="X_pca", n_comps=50):
+def extract_pair(subset_adata, t1, t2, label_col="celltype_update",
+                 use_pca=True, pca_key="X_pca", n_comps=20):
     ad = subset_adata  # already .to_memory()
     assert label_col in ad.obs, f"Missing label column: {label_col}"
     
     if use_pca and pca_key not in ad.obsm:
+        print('Computing PCA')
         sc.pp.normalize_total(ad, target_sum=1e4)
         sc.pp.log1p(ad)
         sc.tl.pca(ad, n_comps=n_comps, svd_solver="arpack")
-
+    
     A = ad[ad.obs["day"] == t1]
     B = ad[ad.obs["day"] == t2]
     XA = A.obsm[pca_key] if use_pca else A.X
     YB = B.obsm[pca_key] if use_pca else B.X
     yA = np.asarray(A.obs[label_col])
     yB = np.asarray(B.obs[label_col])
-
-    return XA, YB, yA, yB
+    
+    return XA, YB, yA, yB'''
 
 # --- Stratify to equal counts per label across A/B (fixed seed) ---
 def stratified_equalize(XA, YA, XB, YB, seed=0):
@@ -59,10 +149,16 @@ def run_pairwise_eval(
     methods=("monge_conj","lot","frlc"),
     label_col="celltype_update",
     seed=0, use_pca=True, pca_key="X_pca", n_comps=50,
-    max_rank=None, subsample_to_nonprime=True
+    max_rank=None, subsample_to_nonprime=True,
+    hiref_iters=300, hiref_max_Q=100, hiref_max_rank=5000,
+    init = 'default', lambda_factor=0.5
 ):
+    
+    cache = f"/scratch/gpfs/ph3641/hm_ot/pca_cache/{t1}_{t2}_pca_{n_comps}.npz"
+    
     # 1) Extract
-    XA, YB, yA, yB = extract_pair(subset_adata, t1, t2, label_col, use_pca, pca_key, n_comps)
+    #XA, YB, yA, yB = extract_pair(subset_adata, t1, t2, label_col, use_pca, pca_key, n_comps)
+    XA, YB, yA, yB = extract_pair(subset_adata, t1, t2, use_pca=True, n_comps=n_comps, pca_cache_path=cache)
     # 2) Equalize per-label counts so A/B have same label histograms
     XA, yA, YB, yB, classes = stratified_equalize(XA, yA, YB, yB, seed=seed)
     
@@ -89,7 +185,10 @@ def run_pairwise_eval(
         method = method.lower()
         try:
             if method == "monge_conj":
-                (Q, R, g), res = run_LowRank.run_monge_conj(XA, YB, rank=rank, ot_solver="HiRef")
+                (Q, R, g), res = run_LowRank.run_monge_conj(XA, YB, rank=rank, ot_solver="HiRef",
+                                                    hiref_iters=hiref_iters, hiref_max_Q=hiref_max_Q, 
+                                                            hiref_max_rank=hiref_max_rank,
+                                                           init=init, lambda_factor=lambda_factor)
             elif method == "lot":
                 (Q, R, g), res = run_LowRank.run_lot(g1, g2, X=XA, Y=YB, rank=rank, epsilon=1e-3)
             elif method == "frlc":
@@ -113,6 +212,8 @@ def run_pairwise_eval(
                 "n_cells": XA.shape[0]
             }
             results.append(row)
+            del Q, R, g
+            gc.collect(); torch.cuda.is_available() and (torch.cuda.synchronize(), torch.cuda.empty_cache()); jax.clear_caches()
         
         except Exception as e:
             results.append({

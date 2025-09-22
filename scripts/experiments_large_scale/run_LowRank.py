@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, '../src')
 import monge_rotate_lr as mr_lr
 from loguru import logger
-
+import gc
 import random
 import jax
 import jax.numpy as jnp
@@ -277,22 +277,29 @@ def compute_lr_sqeuclidean_factors(X_s: jnp.ndarray,
     return A, B
 
 # ---------- HiRef / Monge-rotation K-Means ----------
-def run_monge_conj(XA, YB, rank, ot_solver="HiRef"):
+def run_monge_conj(XA, YB, rank, ot_solver="HiRef",
+                   init='default', hiref_iters=300,
+                   hiref_max_Q=1000, hiref_max_rank=100,
+                   lambda_factor=0.5
+                  ):
+    
     import monge_rotate_lr as mr_lr
-    np_dtype = np.float32  # or float64 if you keep x64
+    np_dtype = np.float64  # or float64 if you keep x64
     XA = np.asarray(XA, dtype=np.float64)
     YB = np.asarray(YB, dtype=np.float64)
     
     t0 = time.time()
     Q, g, R = mr_lr.monge_rotation_kmeans_LR(
-            XA, YB, rank, lambda_factor=0.5, random_state=0, epsilon=1e-2, ot_solver=ot_solver
+            XA, YB, rank, lambda_factor=lambda_factor, random_state=0, epsilon=1e-2, ot_solver=ot_solver,
+                init=init, hiref_iters=hiref_iters, 
+                hiref_max_Q=hiref_max_Q, hiref_max_rank=hiref_max_rank
         )
     t1 = time.time()
     
     _loss_lr_two  # adjust import
     A, B = compute_lr_sqeuclidean_factors(XA, YB)
     cost = float(_loss_lr_two(Q, R, A, B, g))
-
+    
     res = {
         "algorithm": "hiref",
         "rank": int(rank),
@@ -334,6 +341,7 @@ def run_frlc(g1, g2, X=None, Y=None, C=None, rank=64, device=None, dtype=None):
             seed=None,
             gen=gen
         )
+        #,dtype=dtype
         g_t = torch.diag(g_t)
         t1 = time.time()
     else:
@@ -463,6 +471,7 @@ def run_all_methods(XA, YB, yA, yB, methods, rank=64, reg=0.05, ot_solver="HiRef
     methods: list like ["monge_conj", "frlc", "lot", "sinkhorn"]
     evaluate_factors_fn: callable (Q, R, yA, yB) -> dict
     """
+    
     n, m = XA.shape[0], YB.shape[0]
     g1 = np.ones(n, dtype=np.float64) / n
     g2 = np.ones(m, dtype=np.float64) / m
@@ -476,7 +485,7 @@ def run_all_methods(XA, YB, yA, yB, methods, rank=64, reg=0.05, ot_solver="HiRef
                 (Q, R, g), res = run_monge_conj(XA, YB, rank=rank, ot_solver=ot_solver)
                 # ensure numpy
                 Q, R, g = np.asarray(Q), np.asarray(R), np.asarray(g)
-                out[name] = {"result": res, "factors": (Q, R, g), "plan": None}
+                out[name] = {"result": res} #, "factors": (Q, R, g), "plan": None}
 
                 if evaluate_factors_fn is not None:
                     try:
@@ -484,11 +493,12 @@ def run_all_methods(XA, YB, yA, yB, methods, rank=64, reg=0.05, ot_solver="HiRef
                         out[name]["metrics"] = met
                     except Exception as e:
                         logger.warning(f"{name} evaluation failed: {e}")
-
+            
             elif name == "frlc":
+                
                 (Q, R, g), res = run_frlc(g1, g2, X=XA, Y=YB, C=None, rank=rank, device=device)
                 Q, R, g = np.asarray(Q), np.asarray(R), np.asarray(g)
-                out[name] = {"result": res, "factors": (Q, R, g), "plan": None}
+                out[name] = {"result": res} #, "factors": (Q, R, g), "plan": None}
 
                 if evaluate_factors_fn is not None:
                     try:
@@ -500,7 +510,7 @@ def run_all_methods(XA, YB, yA, yB, methods, rank=64, reg=0.05, ot_solver="HiRef
             elif name == "lot":
                 (Q, R, g), res = run_lot(g1, g2, X=XA, Y=YB, C=None, rank=rank, epsilon=1e-3)
                 Q, R, g = np.asarray(Q), np.asarray(R), np.asarray(g)
-                out[name] = {"result": res, "factors": (Q, R, g), "plan": None}
+                out[name] = {"result": res} #, "factors": (Q, R, g), "plan": None}
 
                 if evaluate_factors_fn is not None:
                     try:
@@ -512,7 +522,7 @@ def run_all_methods(XA, YB, yA, yB, methods, rank=64, reg=0.05, ot_solver="HiRef
             elif name == "sinkhorn":
                 P, res = run_sinkhorn(g1, g2, X=XA, Y=YB, C=None, reg=reg)
                 P = np.asarray(P)
-                out[name] = {"result": res, "factors": None, "plan": P}
+                out[name] = {"result": res} #, "factors": None, "plan": P}
 
             else:
                 logger.warning(f"Unknown method '{method}', skipping.")
@@ -520,6 +530,10 @@ def run_all_methods(XA, YB, yA, yB, methods, rank=64, reg=0.05, ot_solver="HiRef
 
             logger.info(f"{name}: cost={out[name]['result']['objective_cost']:.6f}, "
                         f"time={out[name]['result']['runtime_sec']:.3f}s")
+            # Clear memory/cache
+            del Q, R, g
+            gc.collect(); torch.cuda.is_available() and (torch.cuda.synchronize(), torch.cuda.empty_cache()); jax.clear_caches()
+            
         except Exception as e:
             logger.error(f"{name} failed: {e}")
             out[name] = {"error": str(e)}
