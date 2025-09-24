@@ -64,10 +64,6 @@ loss_lr_and_grad = jax.jit(jax.value_and_grad(loss_lr))
 def _step(Q, A, B, gamma):
     val, grad = loss_lr_and_grad(Q, A, B)
     Qn = Q * jnp.exp(-gamma * grad) # Exponential gradient step
-    '''
-    row_scaling_vector = jnp.sum(Qn, axis=1)
-    Qn = jnp.diag(1 / (n * row_scaling_vector)) @ Qn # Diagonal projection of the positive kernel
-    '''
     Qn = Qn * (1.0 / (Qn.sum(axis=1, keepdims=True) * Q.shape[0]))
     return val, Qn
 
@@ -88,7 +84,8 @@ def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
                              random_state=0, epsilon=1e-2, 
                              ot_solver='HiRef', rescale=True, 
                              init='default', hiref_iters=300,
-                             hiref_max_Q=1000, hiref_max_rank=100):
+                             hiref_max_Q=1000, hiref_max_rank=100,
+                            gamma=60):
     """
     Low-rank Monge-rotation k-means initializer + GKMS.
     Avoids forming C; rotates LR factors A,B and (Q1,R2) via P or via a permutation from HiRef.
@@ -159,16 +156,9 @@ def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
             YB = jnp.asarray(Y)
         # returns list of (idxX, idxY) leaves
         frontier = HiRef_fast.hiref_lr_fast(
-            XA, YB, rank_schedule, iters_per_level=hiref_iters, gamma=60.0,
+            XA, YB, rank_schedule, iters_per_level=hiref_iters, gamma=gamma,
             rescale_cost=rescale, return_coupling=False
         )
-        '''
-        primal_cost = HiRef_fast.compute_ot_cost(
-            frontier,
-            XA, YB,
-            sq_euclidean=True,
-        )
-        print(f'Computed Primal Coupling (HiRef) with cost {primal_cost}')'''
         
         # permutation vectors
         pi, inv_pi = _clusters_to_perm(frontier, n)   # pi[i]=j ; inv_pi[j]=i
@@ -222,68 +212,3 @@ def _clusters_to_perm(frontier, n: int) -> tuple[jnp.ndarray, jnp.ndarray]:
     inv_pi = inv_pi.at[pi].set(jnp.arange(n, dtype=jnp.int32))
     return pi, inv_pi
 
-
-'''
-def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
-                             random_state=0, epsilon=1e-2, ot_solver='Sinkhorn'):
-    """
-    Low-rank Monge-rotation k-means initializer + GKMS.
-    Avoids forming C entirely; rotates LR factors instead of C.
-    """
-    n = X.shape[0]
-    # LR factors for squared Euclidean
-    A, B = dist_util.compute_lr_sqeuclidean_factors(X, Y, rescale_cost=False)
-    
-    # Lloyd init
-    labels_X, centers_X = lloyds_kmeans(X, r, random_state=random_state)
-    labels_Y, centers_Y = lloyds_kmeans(Y, r, random_state=random_state)
-
-    # One-hot membership matrices on rows, scaled by 1/n
-    Q1 = jnp.zeros((n, r)).at[jnp.arange(n), labels_X].set(1.0 / n)
-    R2 = jnp.zeros((n, r)).at[jnp.arange(n), labels_Y].set(1.0 / n)
-    
-    # Soft Monge plan via OTT (no dense C; may update to add HiRef)
-    print('Running OT.')
-    if 'Sinkhorn':
-        P = ott_soft_monge_plan_pointcloud(X, Y, epsilon=epsilon) * n
-    elif 'HiRef':
-        rank_schedule = rank_annealing.optimal_rank_schedule(30000, 
-                                                     hierarchy_depth=6, 
-                                                     max_Q=1000, 
-                                                     max_rank=100)
-        with jax.default_device(jax.devices("gpu")[0]):
-            XA = jnp.asarray(X)
-            YB = jnp.asarray(Y)
-        perm = HiRef.hiref_lr(
-            XA, YB, rank_schedule, iters_per_level=100, gamma=60.0,
-            rescale_cost=False, return_coupling=False
-        )
-    
-    print('OT Finished. Starting K-Means.')
-    
-    # Rotate memberships by the Monge plan
-    R1 = P.T @ Q1                     # corresponds to right-rotation (C @ P^T)
-    Q2 = P @ R2                       # corresponds to left-rotation (P^T @ C)
-    
-    g1 = jnp.sum(Q1, axis=0)          # (r,)
-    g2 = jnp.sum(Q2, axis=0)          # (r,)
-    
-    # Initial costs via LR formula (no C)
-    cost1 = lr_cost(A, B, Q1, R1)
-    cost2 = lr_cost(A, B, Q2, R2)
-    
-    logger.info(f"Initialization Costs: ({cost1}, {cost2})")
-    
-    if cost1 < cost2:
-        # Use C @ P^T  ==  A @ (P B)^T  → keep A, set B_rot = P @ B
-        B_rot = P @ B
-        Q0 = stabilize_Q_init(Q1, lambda_factor=lambda_factor)
-        Q, g = gkms_lr(A, B_rot, Q0)
-        return Q, jnp.sum(Q, axis=0), P.T @ Q
-    else:
-        # Use P^T @ C  ==  (P^T A) @ B^T  → keep B, set A_rot = P^T @ A
-        A_rot = P.T @ A
-        Q0 = stabilize_Q_init(Q2, lambda_factor=lambda_factor)
-        Q, g = gkms_lr(A_rot, B, Q0)
-        return P @ Q, jnp.sum(Q, axis=0), Q
-'''

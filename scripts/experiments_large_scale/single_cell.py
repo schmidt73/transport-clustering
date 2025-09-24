@@ -20,7 +20,7 @@ def extract_pair(
     use_pca=True,
     pca_key="X_pca",
     n_comps=20,
-    pca_cache_path=None,   # e.g. "/scratch/.../pca_E8.5-E8.75.npz" (or per-file cache)
+    pca_cache_path=None,   # e.g. "/scratch/.../pca_E8.5-E8.75.npz"
     overwrite_cache=False
 ):
     """
@@ -55,7 +55,6 @@ def extract_pair(
         X_pca_all = cache["X_pca"]
     else:
         # Compute PCA (fast randomized solver), then optionally save
-        # NOTE: do not mutate original .obsm/.X on disk; compute fresh each time here
         ad_local = ad.copy()  # keep subset_adata pristine if needed elsewhere
         sc.pp.normalize_total(ad_local, target_sum=1e4)
         sc.pp.log1p(ad_local)
@@ -63,7 +62,6 @@ def extract_pair(
 
         X_pca_all = ad_local.obsm.get(pca_key, None)
         if X_pca_all is None:
-            # fallback: Scanpy always stores as "X_pca"
             X_pca_all = ad_local.obsm["X_pca"]
         X_pca_all = np.asarray(X_pca_all, dtype=np.float32)
 
@@ -92,28 +90,6 @@ def extract_pair(
     yB = np.asarray(obs.loc[cids_B, label_col].values)
 
     return XA, YB, yA, yB
-
-'''
-# --- Choose A/B from subset_adata (two timepoints, two replicates already selected) ---
-def extract_pair(subset_adata, t1, t2, label_col="celltype_update",
-                 use_pca=True, pca_key="X_pca", n_comps=20):
-    ad = subset_adata  # already .to_memory()
-    assert label_col in ad.obs, f"Missing label column: {label_col}"
-    
-    if use_pca and pca_key not in ad.obsm:
-        print('Computing PCA')
-        sc.pp.normalize_total(ad, target_sum=1e4)
-        sc.pp.log1p(ad)
-        sc.tl.pca(ad, n_comps=n_comps, svd_solver="arpack")
-    
-    A = ad[ad.obs["day"] == t1]
-    B = ad[ad.obs["day"] == t2]
-    XA = A.obsm[pca_key] if use_pca else A.X
-    YB = B.obsm[pca_key] if use_pca else B.X
-    yA = np.asarray(A.obs[label_col])
-    yB = np.asarray(B.obs[label_col])
-    
-    return XA, YB, yA, yB'''
 
 # --- Stratify to equal counts per label across A/B (fixed seed) ---
 def stratified_equalize(XA, YA, XB, YB, seed=0):
@@ -154,7 +130,7 @@ def run_pairwise_eval(
     init = 'default', lambda_factor=0.5
 ):
     
-    cache = f"/scratch/gpfs/ph3641/hm_ot/pca_cache/{t1}_{t2}_pca_{n_comps}.npz"
+    cache = f"{t1}_{t2}_pca_{n_comps}.npz"
     
     # 1) Extract
     #XA, YB, yA, yB = extract_pair(subset_adata, t1, t2, label_col, use_pca, pca_key, n_comps)
@@ -224,8 +200,6 @@ def run_pairwise_eval(
     
     return pd.DataFrame(results)
 
-
-
 def _num_divisors(m: int) -> int:
     # tau(m): number of positive divisors
     if m < 2:
@@ -294,13 +268,13 @@ def subsample_to_size_balanced(
     target_n: int,
     seed: int = 0,
 ):
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(seed) #set rng
     # current per-class counts (equal across A/B by construction)
     counts = np.array([(yA == c).sum() for c in classes], dtype=int)
     total = counts.sum()
     if target_n > total:
         raise ValueError(f"target_n={target_n} exceeds available {total}")
-
+    
     # proportional target per class
     probs = counts / total
     raw = probs * target_n
@@ -310,7 +284,7 @@ def subsample_to_size_balanced(
     ranks = np.argsort(-(raw - floor))  # descending fractional part
     floor[ranks[:rem]] += 1
     target_per_class = floor
-
+    
     # sample indices per class for A and B
     idxA_list, idxB_list = [], []
     for c, k in zip(classes, target_per_class):
@@ -322,13 +296,13 @@ def subsample_to_size_balanced(
         selB = rng.choice(poolB, size=k, replace=False)
         idxA_list.append(selA)
         idxB_list.append(selB)
-
+    
     idxA = np.concatenate(idxA_list) if idxA_list else np.array([], int)
     idxB = np.concatenate(idxB_list) if idxB_list else np.array([], int)
-
+    
     # deterministic shuffle to avoid class blocks
     permA = rng.permutation(idxA)
     permB = rng.permutation(idxB)
-
+    
     return XA[permA], yA[permA], YB[permB], yB[permB]
 

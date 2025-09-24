@@ -23,8 +23,8 @@ def evaluate_factors(
     dict with keys:
       - 'A_AMI', 'A_ARI' : AMI/ARI between yA and argmax(Q)
       - 'B_AMI', 'B_ARI' : AMI/ARI between yB and argmax(R)
-      - 'CMA'            : cross-domain class-mass accuracy:
-                           tr( A_CC diag(1/g) B_CC^T ) / sum(A_CC diag(1/g) B_CC^T)
+      - 'CTA'            : cross-domain class-transfer accuracy:
+                           tr( rho ) / sum(rho)
       - 'classes'        : the class ids used to build the matrix
       - optionally (if flags set):
           * 'A_cluster_purity', 'B_cluster_purity' (if include_purity=True)
@@ -65,10 +65,11 @@ def evaluate_factors(
 
     Qbar = _one_hot(yA_idx, kC, dtype=Q.dtype)   # (n,kC)
     Rbar = _one_hot(yB_idx, kC, dtype=R.dtype)   # (n,kC)
-
+    
+    # Coarsen according to ground-truth labels
     A_CC = Qbar.T @ Q                             # (kC, r)
     B_CC = Rbar.T @ R                             # (kC, r)
-
+    
     # Proper cross-domain CMA from LR factors
     if g is None:
         g = np.full((r,), 1.0 / r, dtype=Q.dtype)

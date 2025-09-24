@@ -19,14 +19,6 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 
-'''
-def seed_everything(seed: int = 42):
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-'''
 def seed_everything(seed: int = 42):
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
     random.seed(seed)
@@ -191,7 +183,6 @@ import torch
 jax.config.update("jax_enable_x64", True)
 
 def as_jax(x, dtype=jnp.float64):
-    """Convert to JAX array with required dtype."""
     return jnp.asarray(x, dtype=dtype)
 
 def as_np(x, dtype=np.float64):
@@ -201,7 +192,6 @@ def as_torch(x, device="cpu", dtype=torch.float64):
     return torch.as_tensor(x, device=device, dtype=dtype)
 
 def compute_sqeuclidean_cost(X, Y, normalize=True, jax_dtype=jnp.float64):
-    """Squared Euclidean cost with optional normalization, JAX return."""
     X = as_jax(X, dtype=jax_dtype)
     Y = as_jax(Y, dtype=jax_dtype)
     x2 = jnp.sum(X * X, axis=1)
@@ -341,7 +331,6 @@ def run_frlc(g1, g2, X=None, Y=None, C=None, rank=64, device=None, dtype=None):
             seed=None,
             gen=gen
         )
-        #,dtype=dtype
         g_t = torch.diag(g_t)
         t1 = time.time()
     else:
@@ -540,7 +529,6 @@ def run_all_methods(XA, YB, yA, yB, methods, rank=64, reg=0.05, ot_solver="HiRef
 
     return out
 
-# ===== Low-rank squared Euclidean factors: C = A B^T =====
 def lr_sqeuclidean_factors(X: jnp.ndarray, Y: jnp.ndarray, rescale: bool = False):
     n, d = X.shape
     A = jnp.concatenate([jnp.sum(X**2, axis=1, keepdims=True),
@@ -561,76 +549,3 @@ def _loss_lr_two(Q: jnp.ndarray, R: jnp.ndarray,
     SA = Q.T @ A          # (r,k)
     RB = R.T @ B          # (r,k)
     return jnp.sum(jnp.sum(RB * SA, axis=1) / jnp.clip(g, 1e-18))
-
-'''
-def lowrank_monge_adapter(XA: np.ndarray, YB: np.ndarray, 
-                          rank: int = 64, device: str = "cpu",
-                          ot_solver='HiRef'
-                         ):
-    
-    XA = np.asarray(XA, dtype=np.float64)
-    YB = np.asarray(YB, dtype=np.float64)
-    
-    try:
-        Q, g, R = mr_lr.monge_rotation_kmeans_LR(
-            XA, YB, rank, lambda_factor=0.5, random_state=0, epsilon=1e-2, ot_solver=ot_solver
-        )
-    except Exception as e:
-        print(f"Low-rank method failed: {e}")
-        return None, None
-    
-    A, B = lr_sqeuclidean_factors( XA, YB )
-    
-    SA = Q.T @ A
-    RB = R.T @ B
-    cost = _loss_lr_two(Q, R, A, B, g)
-    
-    return (Q, R, g), cost
-'''
-
-'''
-def evaluate_plan(P: np.ndarray, yA: np.ndarray, yB: np.ndarray) -> Dict:
-    yA = np.asarray(yA)
-    yB = np.asarray(yB)
-    classes = np.unique(np.concatenate([yA, yB]))
-    class_to_idx = {c: k for k, c in enumerate(classes)}
-    kC = len(classes)
-
-    M = np.zeros((kC, kC), dtype=np.float64)
-    for i, ci in enumerate(yA):
-        row = P[i]
-        for j, cj in enumerate(yB):
-            M[class_to_idx[ci], class_to_idx[cj]] += row[j]
-
-    total_mass = P.sum()
-    class_mass_accuracy = float(np.trace(M) / (total_mass + 1e-12))
-
-    predA = np.empty_like(yA)
-    for i, _ in enumerate(yA):
-        mass_per_class = np.zeros(kC, dtype=np.float64)
-        for j, cj in enumerate(yB):
-            mass_per_class[class_to_idx[cj]] += P[i, j]
-        predA[i] = classes[mass_per_class.argmax()]
-
-    predB = np.empty_like(yB)
-    for j, _ in enumerate(yB):
-        mass_per_class = np.zeros(kC, dtype=np.float64)
-        for i, ci in enumerate(yA):
-            mass_per_class[class_to_idx[ci]] += P[i, j]
-        predB[j] = classes[mass_per_class.argmax()]
-
-    x_AMI = float(AMI(yA, predA))
-    x_ARI = float(ARI(yA, predA))
-    y_AMI = float(AMI(yB, predB))
-    y_ARI = float(ARI(yB, predB))
-
-    return {
-        "class_mass_accuracy": class_mass_accuracy,
-        "x_AMI": x_AMI,
-        "x_ARI": x_ARI,
-        "y_AMI": y_AMI,
-        "y_ARI": y_ARI,
-        "class_mass_matrix": M,
-        "classes": classes,
-    }
-'''
