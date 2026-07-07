@@ -80,7 +80,7 @@ def gkms_lr(A, B, Q_init, gamma=20.0, max_iter=250, tol=1e-9, min_iter=250):
     g = jnp.sum(Q, axis=0)
     return Q, g
 
-def monge_rotation_kmeans_LR(X, Y, r, lambda_factor=0.5,
+def transport_cluster_lr(X, Y, r, lambda_factor=0.5,
                              random_state=0, epsilon=1e-2, 
                              ot_solver='HiRef', rescale=True, 
                              init='default', hiref_iters=300,

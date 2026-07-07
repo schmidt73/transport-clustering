@@ -153,7 +153,7 @@ def save_loss_plot(losses, filename):
     ax.set_ylabel("Loss")
     plt.savefig(filename)
 
-def monge_conjugate(
+def transport_cluster(
     C, r, X=None, Y=None, random_state=0, bm_init=False, kmeans_init=False, 
     rescale_gamma=True, gamma_init=2.0, max_iter=2500, lambda_factor=0.5, 
     log_domain=True, debug=False

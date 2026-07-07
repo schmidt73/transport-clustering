@@ -106,8 +106,8 @@ distance avoids the $\mathcal{O}(n^{-2/d})$ curse of dimensionality of full-rank
 
 | File | Description |
 | :--- | :--- |
-| `monge_rotate.py` | Transport registration + generalized $K$-means in JAX: `monge_conjugate()` (Algorithm 1), mirror-descent solvers `gkms()`/`gkms_logdomain()`, and SDP (Burer-Monteiro) / $k$-means++ initializers. |
-| `monge_rotate_lr.py` | Low-rank / factored variant that never materializes $C$: registers low-rank cost factors $(A,B)$ directly, with Sinkhorn or `HiRef` (hierarchical refinement) as the Step 1 transport solver for large $n$. |
+| `tc.py` | Transport registration + generalized $K$-means in JAX: `transport_cluster()` (Algorithm 1), mirror-descent solvers `gkms()`/`gkms_logdomain()`, and SDP (Burer-Monteiro) / $k$-means++ initializers. |
+| `tc_lr.py` | Low-rank / factored variant that never materializes $C$: `transport_cluster_lr()` registers low-rank cost factors $(A,B)$ directly, with Sinkhorn or `HiRef` (hierarchical refinement) as the Step 1 transport solver for large $n$. |
 | `clustering.py` | Lloyd's $k$-means / $k$-means++, used to initialize $Q$. |
 | `distance_utils.py` | Cost-matrix and low-rank cost-factor utilities (e.g. squared-Euclidean factorizations). |
 | `GKMS/` | Torch implementation of generalized $K$-means (mirror descent with a log-domain, semi-relaxed Sinkhorn inner solver). |
@@ -132,7 +132,7 @@ to `../src`):
 | Notebook | Description |
 | :--- | :--- |
 | `mr_test_2.ipynb` | Sanity-checks full-rank Monge registration and `GKMS` clustering against `FRLC` on the moons-and-Gaussians benchmark. |
-| `mr_LR_test.ipynb` | Validates the low-rank, factored Transport Clustering solver (`monge_rotate_lr`) on planted-Gaussian instances at $n=2500$. |
+| `mr_LR_test.ipynb` | Validates the low-rank, factored Transport Clustering solver (`tc_lr`) on planted-Gaussian instances at $n=2500$. |
 | `CIFAR10_Evaluation.ipynb` | Co-clusters ResNet-18 CIFAR-10 embeddings and evaluates cluster purity against class labels. |
 | `SingleCell_Evaluation*.ipynb` | Co-clusters consecutive mouse-embryo developmental timepoints (E8.5&ndash;E13.5) from single-cell transcriptomic data using the large-scale, `HiRef`-registered solver. |
 
@@ -154,9 +154,9 @@ or directly in Python, from the transport-registered factors:
 
 ```python
 import jax.numpy as jnp
-from monge_rotate import monge_conjugate
+from tc import transport_cluster
 
-Q, g, R = monge_conjugate(C, r=10)   # C: n x n cost matrix, r: target rank K
+Q, g, R = transport_cluster(C, r=10)   # C: n x n cost matrix, r: target rank K
 P = Q @ jnp.diag(1 / g) @ R.T         # recovered rank-K transport plan
 ```
 

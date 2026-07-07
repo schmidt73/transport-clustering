@@ -122,7 +122,7 @@ def setup_lr_ot(XA, YB, yA, yB, classes, rank=None):
 # --- Run all LR methods and evaluate ---
 def run_pairwise_eval(
     subset_adata, t1, t2,
-    methods=("monge_conj","lot","frlc"),
+    methods=("transport_cluster","lot","frlc"),
     label_col="celltype_update",
     seed=0, use_pca=True, pca_key="X_pca", n_comps=50,
     max_rank=None, subsample_to_nonprime=True,
@@ -160,8 +160,8 @@ def run_pairwise_eval(
     for method in methods:
         method = method.lower()
         try:
-            if method == "monge_conj":
-                (Q, R, g), res = run_LowRank.run_monge_conj(XA, YB, rank=rank, ot_solver="HiRef",
+            if method == "transport_cluster":
+                (Q, R, g), res = run_LowRank.run_transport_cluster_lr(XA, YB, rank=rank, ot_solver="HiRef",
                                                     hiref_iters=hiref_iters, hiref_max_Q=hiref_max_Q, 
                                                             hiref_max_rank=hiref_max_rank,
                                                            init=init, lambda_factor=lambda_factor)

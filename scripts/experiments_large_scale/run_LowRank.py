@@ -11,7 +11,7 @@ from sklearn.metrics import adjusted_rand_score as ARI
 import os
 import sys
 sys.path.insert(0, '../src')
-import monge_rotate_lr as mr_lr
+import tc_lr as mr_lr
 from loguru import logger
 import gc
 import random
@@ -267,19 +267,19 @@ def compute_lr_sqeuclidean_factors(X_s: jnp.ndarray,
     return A, B
 
 # ---------- HiRef / Monge-rotation K-Means ----------
-def run_monge_conj(XA, YB, rank, ot_solver="HiRef",
+def run_transport_cluster_lr(XA, YB, rank, ot_solver="HiRef",
                    init='default', hiref_iters=300,
                    hiref_max_Q=1000, hiref_max_rank=100,
                    lambda_factor=0.5
                   ):
-    
-    import monge_rotate_lr as mr_lr
+
+    import tc_lr as mr_lr
     np_dtype = np.float64  # or float64 if you keep x64
     XA = np.asarray(XA, dtype=np.float64)
     YB = np.asarray(YB, dtype=np.float64)
     
     t0 = time.time()
-    Q, g, R = mr_lr.monge_rotation_kmeans_LR(
+    Q, g, R = mr_lr.transport_cluster_lr(
             XA, YB, rank, lambda_factor=lambda_factor, random_state=0, epsilon=1e-2, ot_solver=ot_solver,
                 init=init, hiref_iters=hiref_iters, 
                 hiref_max_Q=hiref_max_Q, hiref_max_rank=hiref_max_rank
@@ -457,7 +457,7 @@ def run_sinkhorn(g1, g2, X=None, Y=None, C=None, reg=0.05):
 def run_all_methods(XA, YB, yA, yB, methods, rank=64, reg=0.05, ot_solver="HiRef",
                     device=None, evaluate_factors_fn=None):
     """
-    methods: list like ["monge_conj", "frlc", "lot", "sinkhorn"]
+    methods: list like ["transport_cluster", "frlc", "lot", "sinkhorn"]
     evaluate_factors_fn: callable (Q, R, yA, yB) -> dict
     """
     
@@ -470,8 +470,8 @@ def run_all_methods(XA, YB, yA, yB, methods, rank=64, reg=0.05, ot_solver="HiRef
     for method in methods:
         name = method.lower()
         try:
-            if name == "monge_conj":
-                (Q, R, g), res = run_monge_conj(XA, YB, rank=rank, ot_solver=ot_solver)
+            if name == "transport_cluster":
+                (Q, R, g), res = run_transport_cluster_lr(XA, YB, rank=rank, ot_solver=ot_solver)
                 # ensure numpy
                 Q, R, g = np.asarray(Q), np.asarray(R), np.asarray(g)
                 out[name] = {"result": res} #, "factors": (Q, R, g), "plan": None}

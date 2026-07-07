@@ -26,7 +26,7 @@ from loguru import logger
 
 sys.path.append("../src")
 
-import monge_rotate as mr
+import tc as mr
 import FRLC.FRLC as frlc
 import LatentOT as latentot
 
@@ -77,7 +77,7 @@ def sinkhorn_rescaling(P, g1, g2, max_iter=100, tol=1e-4):
             break
     return P
 
-def run_monge_conjugate(
+def run_transport_cluster(
         seed : int, 
         g1: jnp.ndarray, 
         g2: jnp.ndarray, 
@@ -85,7 +85,7 @@ def run_monge_conjugate(
         Y: jnp.ndarray = None, 
         C: jnp.ndarray = None
     ):
-    """Run the Monge Conjugation algorithm.
+    """Run the Transport Clustering algorithm.
     """
     if C is None and (X is None or Y is None):
         raise ValueError("Must provide either cost matrix C or both point clouds X and Y.")
@@ -95,7 +95,7 @@ def run_monge_conjugate(
 
     start_time = time.time()
     C = jnp.array(C)
-    Q, g, R = mr.monge_conjugate(C, rank, random_state=seed, bm_init=False, debug=False)
+    Q, g, R = mr.transport_cluster(C, rank, random_state=seed, bm_init=False, debug=False)
     P = Q @ jnp.diag(1 / g) @ R.T
     end_time = time.time()
     solve_time = end_time - start_time
@@ -308,7 +308,7 @@ if __name__ == "__main__":
 
     result = None
     if args.algorithm == "mr":
-        Q, g, R, result = run_monge_conjugate(args.seed, g1, g2, X, Y, C)
+        Q, g, R, result = run_transport_cluster(args.seed, g1, g2, X, Y, C)
     elif args.algorithm == "frlc": 
         torch.manual_seed(args.seed)
         torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
