@@ -22,7 +22,7 @@ Kantorovich problem finds the least-cost coupling over the transportation polyto
 $\Pi(a,b) = \{P \in \mathbb{R}_+^{n\times m} : P\mathbf{1}_m = a,\ P^\top\mathbf{1}_n = b\}$:
 
 $$
-\min_{P \in \Pi(a,b)} \sum_{i=1}^n \sum_{j=1}^m P_{ij}\,c(x_i,y_j) \;=\; \min_{P \in \Pi(a,b)} \langle C, P \rangle_F.
+\min\_{P \in \Pi(a,b)} \sum\_{i=1}^n \sum_{j=1}^m P\_{ij}\,c(x\_i,y\_j) \;=\; \min_{P \in \Pi(a,b)} \langle C, P \rangle\_F.
 $$
 
 **Low-rank OT** (Forrow '19; Scetbon '21; Lin '21; Halmos '24) constrains the non-negative rank of
@@ -30,17 +30,17 @@ $P$ to at most $K \ll n$ by factoring the plan through two smaller couplings $Q,
 marginal $g \in \Delta_K$:
 
 $$
-\min_{\substack{Q \in \Pi(a,g),\, R \in \Pi(b,g) \\ g \in \Delta_K}} \big\langle C,\ Q\,\mathrm{diag}(g^{-1})\,R^\top \big\rangle_F.
+\min\_{\substack{Q \in \Pi(a,g),\, R \in \Pi(b,g) \\ g \in \Delta_K}} \big\langle C,\ Q\,\mathrm{diag}(g^{-1})\,R^\top \big\rangle\_F.
 $$
 
-$K$-means is the special case $X = Y$, $C = C_{\ell_2^2}$: writing the (hard) assignment matrix as
+$K$-means is the special case $X = Y$, $C = C\_{\ell_2^2}$: writing the (hard) assignment matrix as
 $Q \in \{0, 1/n\}^{n\times K}$, its mean-free distortion is
-$\langle C_{\ell_2^2},\ Q\,\mathrm{diag}(1/Q^\top\mathbf{1}_n)\,Q^\top \rangle_F$. **Generalized
+$\langle C\_{\ell\_2^2},\ Q\,\mathrm{diag}(1/Q^\top\mathbf{1}\_n)\,Q^\top \rangle\_F$. **Generalized
 $K$-means** (Scetbon '22) extends this mean-free objective to an arbitrary cost $C$ over hard
-assignment matrices $\Pi_\bullet(u_n,\cdot)$:
+assignment matrices $\Pi\_\bullet(u_n,\cdot)$:
 
 $$
-\min_{Q \in \Pi_\bullet(u_n,\cdot)} \big\langle C,\ Q\,\mathrm{diag}(1/Q^\top\mathbf{1}_n)\,Q^\top \big\rangle_F.
+\min\_{Q \in \Pi\_\bullet(u\_n,\cdot)} \big\langle C,\ Q\,\mathrm{diag}(1/Q^\top\mathbf{1}\_n)\,Q^\top \big\rangle\_F.
 $$
 
 ## Transport Clustering
@@ -52,10 +52,10 @@ three-variable optimization $(Q,R,g)$ into an optimization over a single cluster
 permutation $P_\sigma$:
 
 $$
-\min_{\substack{Q \in \Pi_\bullet(u_n,\cdot) \\ P_\sigma \in \mathcal{P}_n}} \Big\langle C P_\sigma^\top,\ Q\,\mathrm{diag}(1/Q^\top\mathbf{1}_n)\,Q^\top \Big\rangle_F.
+\min\_{\substack{Q \in \Pi\_\bullet(u\_n,\cdot) \\ P\_\sigma \in \mathcal{P}\_n}} \Big\langle C P\_\sigma^\top,\ Q\,\mathrm{diag}(1/Q^\top\mathbf{1}\_n)\,Q^\top \Big\rangle\_F.
 $$
 
-For any *fixed* $P_\sigma$, this is exactly the generalized $K$-means problem above. This raises the
+For any *fixed* $P\_\sigma$, this is exactly the generalized $K$-means problem above. This raises the
 natural question:
 
 > *Is there an efficiently computable choice of permutation matrix $P_\sigma$ that accurately
@@ -63,17 +63,17 @@ natural question:
 
 We answer this in the affirmative: taking $P_\sigma = P_{\sigma^\ast}$, the solution to the
 (convex, polynomial-time) full-rank transport problem, and using it to *register* the cost
-$\tilde{C} = C P_{\sigma^\ast}^\top$, yields **Transport Clustering (TC)**:
+$\tilde{C} = C P\_{\sigma^\ast}^\top$, yields **Transport Clustering (TC)**:
 
 > **Algorithm 1 (Transport Clustering).**
 > **Input:** cost matrix $C \in \mathbb{R}^{n\times n}$, target rank $K$.
 > 1. **Transport.** Compute the optimal full-rank plan
->    $P_{\sigma^\ast} \leftarrow n \cdot \arg\min_{P \in \Pi(u_n,u_n)} \langle C, P \rangle_F$.
-> 2. **Clustering.** Register the cost $\tilde{C} \leftarrow C P_{\sigma^\ast}^\top$ and solve
+>    $P\_{\sigma^\ast} \leftarrow n \cdot \arg\min\_{P \in \Pi(u\_n,u\_n)} \langle C, P \rangle\_F$.
+> 2. **Clustering.** Register the cost $\tilde{C} \leftarrow C P\_{\sigma^\ast}^\top$ and solve
 >    generalized $K$-means:
->    $Q \leftarrow \arg\min_{Q \in \Pi_\bullet(u_n,\cdot)} \langle \tilde{C},\ Q\,\mathrm{diag}(1/Q^\top\mathbf{1}_n)\,Q^\top \rangle_F$.
+>    $Q \leftarrow \arg\min\_{Q \in \Pi\_\bullet(u\_n,\cdot)} \langle \tilde{C},\ Q\,\mathrm{diag}(1/Q^\top\mathbf{1}\_n)\,Q^\top \rangle\_F$.
 >
-> **Output:** the low-rank factors $(Q,\ P_{\sigma^\ast}^\top Q)$.
+> **Output:** the low-rank factors $(Q,\ P\_{\sigma^\ast}^\top Q)$.
 
 ## Theoretical guarantees
 
@@ -83,7 +83,7 @@ variances. **Theorem 4.1** shows that, given an exact generalized $K$-means (or 
 oracle, Algorithm 1 satisfies
 
 $$
-\min_{Q \in \Pi_\bullet(u_n,\cdot)} \big\langle \tilde{C},\ Q\,\mathrm{diag}(1/Q^\top\mathbf{1}_n)\,Q^\top \big\rangle_F
+\min_{Q \in \Pi\_\bullet(u\_n,\cdot)} \big\langle \tilde{C},\ Q\,\mathrm{diag}(1/Q^\top\mathbf{1}\_n)\,Q^\top \big\rangle\_F
 \;\le\;
 \begin{cases}
 (1+\gamma)\cdot \mathrm{OPT} & C \text{ a metric of negative type,} \\
@@ -169,7 +169,7 @@ For questions, discussions, or collaboration inquiries, feel free to reach out a
 
 ## Citation
 
-If you find this work useful, please cite:
+If you found this paper useful to your work, please cite the paper:
 
 ```bibtex
 @inproceedings{
